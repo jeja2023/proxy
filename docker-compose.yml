@@ -1,0 +1,11 @@
+services:
+  proxy-bridge:
+    image: ghcr.io/sagernet/sing-box:latest
+    container_name: universal-proxy-bridge
+    restart: always
+    volumes:
+      - ./config.json:/etc/sing-box/config.json
+    ports:
+      - "2080:2080"
+      - "9020:9020"
+    command: run -c /etc/sing-box/config.json

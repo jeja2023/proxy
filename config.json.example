@@ -1,0 +1,40 @@
+{
+  "log": {
+    "level": "info",
+    "timestamp": true
+  },
+  "inbounds": [
+    {
+      "type": "http",
+      "tag": "http-in",
+      "listen": "0.0.0.0",
+      "listen_port": 2080
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "vless",
+      "tag": "proxy-node",
+      "server": "YOUR_SERVER_ADDRESS",
+      "server_port": 443,
+      "uuid": "YOUR_UUID",
+      "tls": {
+        "enabled": true,
+        "server_name": "YOUR_SERVER_NAME",
+        "reality": {
+          "enabled": true,
+          "public_key": "YOUR_PUBLIC_KEY",
+          "short_id": "YOUR_SHORT_ID"
+        },
+        "utls": {
+          "enabled": true,
+          "fingerprint": "chrome"
+        }
+      }
+    },
+    {
+      "type": "direct",
+      "tag": "direct"
+    }
+  ]
+}

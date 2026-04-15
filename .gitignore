@@ -1,0 +1,6 @@
+config.json
+full_xray_config.json
+singbox_config.json
+.vscode/
+*.log
+.DS_Store
