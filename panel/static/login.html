@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>登录 · 网枢 NetHub</title>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml" />
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body class="login-page">
+  <div class="login-shell card">
+    <h1 class="login-title">网枢 NetHub</h1>
+
+    <form id="login-form" class="login-form">
+      <label class="field">
+        <span class="field-label">用户名</span>
+        <input type="text" id="login-username" autocomplete="username" required />
+      </label>
+      <label class="field">
+        <span class="field-label">密码</span>
+        <div class="password-input-wrap">
+          <input type="password" id="login-password" autocomplete="current-password" required />
+          <button type="button" id="btn-password-toggle" class="password-toggle-btn" title="显示/隐藏密码" tabindex="-1">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"></path><line x1="1" y1="1" x2="23" y2="23"></line></svg>
+          </button>
+        </div>
+      </label>
+      <button type="submit" id="btn-login-submit">登录</button>
+    </form>
+    <p id="login-error" class="error hidden"></p>
+  </div>
+  <script>
+    (function () {
+      var form = document.getElementById("login-form");
+      var err = document.getElementById("login-error");
+      var btn = document.getElementById("btn-login-submit");
+      var pwInput = document.getElementById("login-password");
+      var pwToggle = document.getElementById("btn-password-toggle");
+
+      if (pwToggle && pwInput) {
+        var eyeOpen = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>';
+        var eyeClosed = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"></path><line x1="1" y1="1" x2="23" y2="23"></line></svg>';
+        pwToggle.addEventListener("click", function (ev) {
+          ev.preventDefault();
+          var isPassword = pwInput.type === "password";
+          pwInput.type = isPassword ? "text" : "password";
+          pwToggle.innerHTML = isPassword ? eyeOpen : eyeClosed;
+        });
+      }
+
+      form.addEventListener("submit", async function (ev) {
+        ev.preventDefault();
+        err.classList.add("hidden");
+        var user = document.getElementById("login-username").value;
+        var pw = document.getElementById("login-password").value;
+        btn.disabled = true;
+        var oldText = btn.textContent;
+        btn.textContent = "登录中…";
+        try {
+          var r = await fetch("/api/login", {
+            method: "POST",
+            credentials: "same-origin",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ username: user, password: pw }),
+          });
+          var data = null;
+          try {
+            data = await r.json();
+          } catch (_) {
+            data = {};
+          }
+          if (r.ok) {
+            window.location.href = "/";
+            return;
+          }
+          err.textContent = (data && data.detail) || r.statusText || "登录失败";
+          err.classList.remove("hidden");
+        } catch (e) {
+          err.textContent = e.message || "网络错误";
+          err.classList.remove("hidden");
+        } finally {
+          btn.disabled = false;
+          btn.textContent = oldText;
+        }
+      });
+    })();
+  </script>
+</body>
+</html>

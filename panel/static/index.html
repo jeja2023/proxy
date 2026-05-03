@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>网枢 NetHub</title>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml" />
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <div id="global-loader" class="hidden" aria-hidden="true">
+    <div class="loader-spinner"></div>
+    <div id="global-loader-text" class="loader-text">加载中...</div>
+  </div>
+  <header class="header">
+    <div class="header-bar">
+      <div class="header-titles">
+        <h1>网枢 NetHub</h1>
+        <span id="health-text" class="header-health hidden">检查连接中…</span>
+      </div>
+      <button type="button" id="btn-logout" class="btn-header-logout hidden" aria-label="退出登录">
+        退出
+      </button>
+    </div>
+  </header>
+
+  <div class="app-layout">
+    <aside id="sidebar-nav" class="sidebar hidden" aria-label="主导航">
+      <div class="sidebar-inner">
+        <p class="sidebar-heading">菜单</p>
+        <button type="button" class="nav-item active" data-tab="node" aria-current="page">
+          <span class="nav-item-icon" aria-hidden="true">
+            <svg class="icon-svg" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <rect width="7" height="7" x="3" y="3" rx="1" />
+              <rect width="7" height="7" x="14" y="3" rx="1" />
+              <rect width="7" height="7" x="14" y="14" rx="1" />
+              <rect width="7" height="7" x="3" y="14" rx="1" />
+            </svg>
+          </span>
+          <span class="nav-item-label">切换节点</span>
+        </button>
+        <button type="button" class="nav-item" data-tab="import">
+          <span class="nav-item-icon" aria-hidden="true">
+            <svg class="icon-svg" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+              <polyline points="17 8 12 3 7 8" />
+              <line x1="12" x2="12" y1="3" y2="15" />
+            </svg>
+          </span>
+          <span class="nav-item-label">节点管理</span>
+        </button>
+        <button type="button" class="nav-item" data-tab="logs">
+          <span class="nav-item-icon" aria-hidden="true">
+            <svg class="icon-svg" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+              <polyline points="14 2 14 8 20 8" />
+              <line x1="16" x2="8" y1="13" y2="13" />
+              <line x1="16" x2="8" y1="17" y2="17" />
+              <line x1="10" x2="8" y1="9" y2="9" />
+            </svg>
+          </span>
+          <span class="nav-item-label">系统日志</span>
+        </button>
+      </div>
+    </aside>
+
+    <main class="main">
+    <section id="login-section" class="card hidden">
+      <h2>重新登录</h2>
+      <p class="hint">
+        会话已失效。请输入环境变量中的 <code>PANEL_ADMIN_USER</code> 与 <code>PANEL_ADMIN_PASSWORD</code>，或使用
+        <a href="/login">登录页</a>。
+      </p>
+      <form id="login-form" class="login-form">
+        <label class="field">
+          <span class="field-label">用户名</span>
+          <input type="text" id="login-username" placeholder="请输入用户名" autocomplete="username" />
+        </label>
+        <label class="field">
+          <span class="field-label">密码</span>
+          <input type="password" id="login-password" placeholder="请输入密码" autocomplete="current-password" />
+        </label>
+        <button type="submit">登录</button>
+      </form>
+      <p id="login-error" class="error hidden"></p>
+    </section>
+
+
+
+    <div id="panel-node">
+      <section id="selector-section" class="card hidden">
+        <h2>当前代理 <span id="selector-tag" class="tag"></span></h2>
+        <p class="hint">
+          点击卡片即可切换节点；卡片左侧小图标为测延迟。工具栏左侧为「全部测延迟」。延迟与网速档位（M/s）由基于延迟估算的理论带宽（非真实下载带宽）。
+        </p>
+        <div class="node-toolbar">
+          <div class="node-toolbar-left">
+            <button
+              type="button"
+              id="btn-test-all"
+              class="btn-icon btn-icon--toolbar"
+              title="测试全部延迟"
+              aria-label="测试全部延迟"
+            >
+              <svg class="icon-svg" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+                <path d="M3 3v5h5" />
+                <path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16" />
+                <path d="M16 16h5v5" />
+              </svg>
+            </button>
+            <div class="auto-switch-wrap">
+              <label class="switch" for="cb-auto-switch">
+                <input type="checkbox" id="cb-auto-switch" />
+                <span class="slider"></span>
+              </label>
+              <span class="auto-switch-label">自动切换</span>
+            </div>
+            <div class="node-status-inline">
+              <span id="node-test-hint" class="node-toolbar-hint" aria-live="polite"></span>
+              <span id="apply-msg" class="msg hidden"></span>
+            </div>
+          </div>
+        </div>
+        <div id="node-cards" class="node-cards" role="list"></div>
+      </section>
+
+      <section id="error-section" class="card error-card hidden">
+        <h2>无法加载</h2>
+        <pre id="error-detail"></pre>
+      </section>
+    </div>
+
+    <div id="panel-import" class="hidden">
+      <section class="card panel-import-shared">
+        <div class="vault-manage-head">
+          <div class="header-titles">
+            <h2>节点管理</h2>
+            <p id="vault-status" class="hint"></p>
+          </div>
+          <div class="vault-manage-head-right">
+            <button type="button" id="btn-vault-create">新建节点库</button>
+            <button type="button" id="btn-vault-reset" class="btn-secondary">删除全部</button>
+          </div>
+        </div>
+        
+        <div class="vault-manage-table-wrap">
+          <table class="vault-manage-table">
+            <thead>
+              <tr>
+                <th style="width: 60px; text-align: center;">序号</th>
+                <th style="width: 120px;">库名称</th>
+                <th style="width: 80px; text-align: center;">节点数量</th>
+                <th style="width: 140px; text-align: center;">节点管理</th>
+                <th style="width: 80px; text-align: center;">启用</th>
+                <th style="width: 160px; text-align: center;">操作</th>
+              </tr>
+            </thead>
+            <tbody id="vault-manage-tbody"></tbody>
+          </table>
+        </div>
+        <p id="vault-msg" class="msg hidden"></p>
+      </section>
+
+      <!-- 导入方式选择弹窗 -->
+      <div id="modal-import-choice" class="modal-overlay hidden">
+        <div class="modal">
+          <div class="modal-head">
+            <h3 class="modal-title">选择导入方式</h3>
+          </div>
+          <div class="modal-body">
+            <p class="modal-desc">请选择要将节点导入到库 <strong id="import-target-name"></strong> 的方式：</p>
+            <div class="import-choices-grid">
+              <button type="button" class="import-choice-btn" data-type="sub">
+                <span class="choice-icon">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg>
+                </span>
+                <span class="choice-label">订阅链接</span>
+              </button>
+              <button type="button" class="import-choice-btn" data-type="qr">
+                <span class="choice-icon">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><path d="M7 7h.01"></path><path d="M17 7h.01"></path><path d="M7 17h.01"></path><path d="M17 17h.01"></path><path d="M12 12h.01"></path></svg>
+                </span>
+                <span class="choice-label">二维码</span>
+              </button>
+              <button type="button" class="import-choice-btn" data-type="manual">
+                <span class="choice-icon">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg>
+                </span>
+                <span class="choice-label">手动粘贴</span>
+              </button>
+              <button type="button" class="import-choice-btn" data-type="file">
+                <span class="choice-icon">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y1="13"></line><line x1="16" y1="17" x2="8" y1="17"></line><polyline points="10 9 9 9 8 9"></polyline></svg>
+                </span>
+                <span class="choice-label">文件导入</span>
+              </button>
+            </div>
+          </div>
+          <div class="modal-actions">
+            <button type="button" onclick="hideModal('modal-import-choice')" class="btn-secondary">取消</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- 各种导入表单弹窗 -->
+      <div id="modal-import-sub" class="modal-overlay hidden">
+        <div class="modal">
+          <div class="modal-head"><h3 class="modal-title">订阅导入</h3></div>
+          <div class="modal-body">
+            <form id="vault-sub-form">
+              <label class="field">
+                <span class="field-label">订阅地址</span>
+                <input type="url" id="vault-subscription-url" placeholder="https://example.com/subscription" required />
+              </label>
+              <div class="modal-actions">
+                <button type="button" onclick="hideModal('modal-import-sub')" class="btn-secondary">取消</button>
+                <button type="submit">开始拉取并导入</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      </div>
+
+      <div id="modal-import-manual" class="modal-overlay hidden">
+        <div class="modal modal-xl">
+          <div class="modal-head"><h3 id="import-manual-title" class="modal-title">手动 / 文件导入</h3></div>
+          <div class="modal-body">
+            <form id="vault-import-form">
+              <div id="import-qr-section" class="hidden">
+                <div class="field">
+                  <span class="field-label">扫描二维码</span>
+                  <div class="qr-row">
+                    <button type="button" id="btn-qr-scan" class="btn-secondary">开启摄像头</button>
+                    <button type="button" id="btn-qr-stop" class="btn-secondary hidden">停止</button>
+                    <label class="btn-secondary qr-upload">上传图片<input id="qr-file" type="file" accept="image/*" /></label>
+                  </div>
+                  <div id="qr-scan-area" class="qr-scan-area hidden">
+                    <video id="qr-video" class="qr-video" playsinline muted></video>
+                  </div>
+                  <p id="qr-msg" class="hint hidden"></p>
+                </div>
+              </div>
+
+              <div id="import-file-section" class="hidden">
+                <div class="field">
+                  <span class="field-label">选择文件</span>
+                  <div id="vault-file-drop" class="file-drop" role="button" tabindex="0">
+                    <div class="file-drop-title">点击或拖拽文件</div>
+                    <input id="vault-file" class="file-drop-input" type="file" accept=".txt,.csv,.tsv" />
+                  </div>
+                </div>
+              </div>
+
+              <div id="import-manual-section">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
+                  <span class="field-label" style="margin-bottom: 0;">分享链接 (每行一个)</span>
+                  <button type="button" id="btn-clear-vault-urls" class="btn-danger-light">清空列表</button>
+                </div>
+                <textarea id="vault-urls" class="textarea-lg" placeholder="ss://...&#10;vmess://...&#10;trojan://..."></textarea>
+              </div>
+
+              <div class="modal-actions">
+                <button type="button" onclick="hideModal('modal-import-manual')" class="btn-secondary">取消</button>
+                <button type="submit">开始导入</button>
+              </div>
+            </form>
+          </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 查看节点弹窗 -->
+  <div id="modal-vault-view" class="modal-overlay hidden">
+    <div class="modal modal-lg">
+      <div class="modal-head">
+        <h3 class="modal-title">查看节点 - <span id="view-vault-name"></span></h3>
+      </div>
+      <div class="modal-body">
+        <div id="view-vault-content" class="vault-nodes-list"></div>
+      </div>
+      <div class="modal-actions">
+        <button type="button" onclick="hideModal('modal-vault-view')" class="btn-secondary">关闭</button>
+      </div>
+    </div>
+  </div>
+
+
+
+    <div id="modal-overlay" class="modal-overlay hidden" role="presentation">
+      <div class="modal modal-lg" role="dialog" aria-modal="true" aria-labelledby="modal-title" aria-describedby="modal-desc">
+        <div class="modal-head">
+          <h3 id="modal-title" class="modal-title">确认操作</h3>
+        </div>
+        <div class="modal-body">
+          <p id="modal-desc" class="modal-desc"></p>
+          <div id="modal-extra" class="modal-extra hidden"></div>
+        </div>
+        <div class="modal-actions">
+          <button type="button" id="modal-cancel" class="btn-secondary">取消</button>
+          <button type="button" id="modal-confirm">确认</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="panel-logs" class="hidden">
+      <section class="card panel-logs-card">
+        <div class="panel-logs-head">
+          <h2>系统日志</h2>
+          <button type="button" id="btn-refresh-logs" class="btn-secondary">刷新</button>
+        </div>
+        <p id="panel-logs-hint" class="hint"></p>
+        <div id="panel-log-table-wrap" class="panel-log-table-wrap" aria-live="polite"></div>
+      </section>
+    </div>
+    </main>
+  </div>
+
+  <footer class="footer">
+    <span>© 网枢 NetHub</span>
+  </footer>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

@@ -1,6 +1,29 @@
+# 本地/生成配置（含节点与密钥）
 config.json
 full_xray_config.json
 singbox_config.json
+urls.txt
+nodes.txt
+.env
+.env.*
+*.local.json
+secrets.json
+!.env.example
+
+# Python 缓存
+__pycache__/
+*.pyc
+
+# 加密节点库与面板写入的本地数据（勿提交）
+data/
+
+# 本地放置的 sing-box 可执行文件（见 run_local.py）
+bin/
+
+# Python 虚拟环境（本地创建：python -m venv .venv）
+.venv/
+venv/
+
 .vscode/
 *.log
 .DS_Store

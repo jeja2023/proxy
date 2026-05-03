@@ -1,11 +1,61 @@
 services:
   proxy-bridge:
     image: ghcr.io/sagernet/sing-box:latest
-    container_name: universal-proxy-bridge
+    container_name: nethub-core
     restart: always
     volumes:
       - ./config.json:/etc/sing-box/config.json
     ports:
       - "2080:2080"
-      - "9020:9020"
     command: run -c /etc/sing-box/config.json
+    # 校验挂载的配置可被 sing-box 解析；启动宽限期内需能通过检查，面板才会启动
+    healthcheck:
+      test:
+        - CMD
+        - sing-box
+        - check
+        - -c
+        - /etc/sing-box/config.json
+      interval: 30s
+      timeout: 20s
+      retries: 5
+      start_period: 35s
+    stop_grace_period: 15s
+
+  panel:
+    profiles: ["panel"]
+    build:
+      context: .
+      dockerfile: panel/Dockerfile
+    container_name: nethub-panel
+    restart: always
+    ports:
+      - "8080:8080"
+    volumes:
+      # 与 sing-box 共用宿主机上的 config.json；面板可写则导入节点后会更新，需重启 proxy-bridge 加载
+      - ./config.json:/app/config.json
+      - ./data:/app/data
+    environment:
+      PROXY_REPO_ROOT: /app
+      PROXY_CONFIG_PATH: /app/config.json
+      PROXY_DATA_DIR: /app/data
+      PYTHONPATH: /app
+      CLASH_API_URL: http://proxy-bridge:9020
+      CLASH_API_SECRET: ${CLASH_API_SECRET:-}
+      PANEL_ADMIN_USER: ${PANEL_ADMIN_USER:-admin}
+      PANEL_ADMIN_PASSWORD: ${PANEL_ADMIN_PASSWORD:-}
+      PANEL_SESSION_SECRET: ${PANEL_SESSION_SECRET:-nethub-panel-secret-change-me}
+    depends_on:
+      proxy-bridge:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - curl
+        - -sf
+        - http://127.0.0.1:8080/api/live
+      interval: 30s
+      timeout: 8s
+      retries: 3
+      start_period: 25s
+    stop_grace_period: 10s

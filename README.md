@@ -1,43 +1,64 @@
-# Proxy Bridge 代理中转服务
+# 网枢 NetHub - 高性能代理中转系统
 
-本工具用于将复杂的加密协议（VLESS, Hysteria2, TUIC, Shadowsocks）桥接转换为标准 HTTP 代理，主要用于支持 OpenAI 自动化注册等仅支持标准协议的项目。
+网枢 NetHub 是一款专为现代化网络环境设计的代理中转与管理工具。它能将复杂的加密协议（VLESS, Hysteria2, TUIC, Shadowsocks）桥接转换为标准 HTTP 代理，并提供专业级的 Web 管理界面。
 
-## 🚀 快速开始
+## 🚀 核心特性
 
-### 1. 准备节点
-1. 打开 `generate_singbox.py`。
-2. 将您的节点链接粘贴到 `urls` 列表中。
-3. 运行转换脚本：`python generate_singbox.py`。
-   - 这将在本地生成通用的 `config.json`。
+*   **全协议支持**：轻松桥接 VLESS (Reality), Hysteria2, TUIC 等主流协议。
+*   **统一管理面板**：内置“网枢”管理后台，支持节点切换、订阅导入、系统日志审计。
+*   **安全性设计**：支持节点加密库（Vault），敏感链接不落盘，全流程本地化安全处理。
+*   **极简部署**：一键脚本启动，支持容器化（Docker）与直接运行。
 
-### 2. 在服务器部署
-如果您在云服务器上运行，请直接执行整合后的部署脚本：
+## 🛠️ 快速启动
+
+### 1. 本地直接运行（推荐）
+
+在项目根目录下执行唯一启动入口：
+
 ```bash
-chmod +x 一键部署.sh
-./一键部署.sh
+python run.py
 ```
-*脚本会自动检查并安装 Docker 环境（如果缺失），并启动中转服务。*
 
-### 3. 在 Windows 本地运行
-右键点击 `启动服务.ps1`，选择“使用 PowerShell 运行”即可。
+该脚本将自动完成以下操作：
+1. 安装/检查 Python 依赖。
+2. 自动下载最新版 `sing-box` 内核。
+3. 启动 Web 管理面板（默认：`http://127.0.0.1:8080`）。
+4. 启动代理内核并根据配置热加载节点。
+
+### 2. Docker 部署 (推荐用于云服务器)
+
+最简单的方式是使用项目自带的一键部署脚本，它会自动处理 Docker 环境安装、环境配置初始化与服务启动：
+
+```bash
+chmod +x 一键部署.sh && ./一键部署.sh
+```
+
+或者手动执行：
+
+```bash
+docker compose --profile panel up -d
+```
+
+## 📁 目录结构
+
+*   `run.py`: **主启动入口**。负责全栈服务的初始化与运行。
+*   `panel/`: **网枢管理后台**。包含前端界面、REST API 及中间件逻辑。
+*   `core/`: **核心逻辑库**。处理配置生成、节点加密等底层业务。
+*   `scripts/`: **维护工具箱**。包含手动生成配置等辅助脚本。
+*   `data/`: **数据存储**。存放节点加密库、审计日志及运行状态。
+*   `bin/`: **二进制目录**。存放 sing-box 内核执行程序。
+
+## ⚙️ 运维指引
+
+*   **手动生成配置**：`python scripts/generate_singbox.py`
+*   **验证代理状态**：`curl -x http://127.0.0.1:2080 https://www.google.com -I`
+*   **查看系统日志**：可通过 Web 面板实时查看，或直接查阅 `data/panel_audit.jsonl`。
+
+## ⚠️ 安全提示
+
+1.  **强密码建议**：请务必在 `.env` 中设置复杂的 `PANEL_ADMIN_PASSWORD` 与 `CLASH_API_SECRET`。
+2.  **端口保护**：默认 HTTP 代理端口为 `2080`，管理端口为 `8080`。在公网环境运行时，请通过防火墙限制来源 IP。
+3.  **密钥安全**：`.env` 与 `config.json` 包含敏感信息，已默认被 Git 忽略，请勿手动上传至公共仓库。
 
 ---
-
-## 🛠️ 运维与验证
-
-- **验证代理**: `curl -x http://127.0.0.1:2080 https://www.google.com -I`
-- **查看日志**: `docker compose logs -f`
-- **重启服务**: `docker compose restart`
-- **停止服务**: `docker compose down`
-
-## 📁 文件说明
-- `config.json`: 核心配置文件（由脚本生成）。
-- `config.json.example`: 配置模板（不含私密信息）。
-- `generate_singbox.py`: 节点转换工具。
-- `docker-compose.yml`: Docker 编排配置。
-- `一键部署.sh`: Linux 环境自动化部署脚本。
-- `启动服务.ps1`: Windows 环境启动脚本。
-
----
-> [!IMPORTANT]
-> **安全提示**：默认监听端口为 `2080`。在公网服务器运行时，请务必在安全组中限制来源 IP，或仅限本地访问，防止代理被盗用。
+© 网枢 NetHub

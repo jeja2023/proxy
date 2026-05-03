@@ -1,53 +1,161 @@
 #!/bin/bash
 
 # ==========================================================
-# Proxy Bridge - 云服务器一键部署脚本
+# 网枢 NetHub - 云服务器一键部署脚本
 # ==========================================================
 
-echo "开始部署代理中转服务..."
+set -e
+
+# 颜色定义
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
+
+echo -e "${GREEN}>>> 开始部署 网枢 NetHub 代理中转服务...${NC}"
 
 # 1. 检查并安装 Docker 环境
 if ! [ -x "$(command -v docker)" ]; then
-    echo "检测到未安装 Docker，正在尝试安装..."
+    echo -e "${YELLOW}检测到未安装 Docker，正在尝试安装...${NC}"
     curl -fsSL https://get.docker.com | bash -s docker
     sudo systemctl enable --now docker
-    sudo usermod -aG docker "$USER"
-    echo "Docker 安装完成。建议重新登录 SSH 以生效权限。"
+    sudo usermod -aG docker "$USER" || true
+    echo -e "${GREEN}Docker 安装完成。建议重新登录 SSH 以生效权限。${NC}"
 fi
 
-# 2. 检查 docker-compose
-if ! [ -x "$(command -v docker-compose)" ]; then
-    if ! docker compose version > /dev/null 2>&1; then
-        echo "正在安装 docker-compose..."
-        sudo apt update && sudo apt install docker-compose -y
-    fi
-    DOCKER_COMPOSE="docker compose"
-else
-    DOCKER_COMPOSE="docker-compose"
-fi
-
-# 3. 确保配置文件存在
-if [ ! -f "config.json" ]; then
-    if [ -f "config.json.example" ]; then
-        echo "未找到 config.json，正在根据模板创建示例..."
-        cp config.json.example config.json
+# 2. 检查 Docker Compose (V2 优先)
+DOCKER_COMPOSE="docker compose"
+if ! docker compose version > /dev/null 2>&1; then
+    if [ -x "$(command -v docker-compose)" ]; then
+        DOCKER_COMPOSE="docker-compose"
     else
-        echo "错误: 缺少配置模板文件。"
+        echo -e "${YELLOW}正在安装 Docker Compose 插件...${NC}"
+        sudo apt-get update && sudo apt-get install -y docker-compose-plugin || sudo apt-get install -y docker-compose || sudo yum install -y docker-compose
+    fi
+fi
+
+# 3. 配置文件初始化
+echo -e "${GREEN}>>> 初始化配置文件...${NC}"
+
+# 初始化 .env
+if [ ! -f ".env" ]; then
+    if [ -f ".env.example" ]; then
+        cp .env.example .env
+        echo -e "${GREEN}已创建 .env 配置文件。${NC}"
+    else
+        echo -e "${RED}错误: 缺少 .env.example 模板文件。${NC}"
         exit 1
     fi
 fi
 
-# 4. 启动服务
-echo "正在启动容器服务..."
-sudo $DOCKER_COMPOSE up -d
+# 生成随机密钥的函数
+generate_secret() {
+    if command -v openssl >/dev/null 2>&1; then
+        openssl rand -base64 24 | tr -d '\n'
+    else
+        cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 32 | head -n 1
+    fi
+}
 
-# 5. 状态检查
+update_env() {
+    local key=$1
+    local value=$2
+    if grep -q "^${key}=" .env; then
+        # 注意：这里使用简单替换，不考虑复杂转义
+        sed -i "s|^${key}=.*|${key}=${value}|" .env
+    else
+        echo "${key}=${value}" >> .env
+    fi
+}
+
+# 检查并补全关键配置
+CLASH_SECRET=$(grep "^CLASH_API_SECRET=" .env | cut -d'=' -f2 | xargs)
+if [ -z "$CLASH_SECRET" ]; then
+    AUTO_SECRET=$(generate_secret)
+    echo -e "${YELLOW}已自动生成 CLASH_API_SECRET 随机密钥。${NC}"
+    update_env "CLASH_API_SECRET" "$AUTO_SECRET"
+fi
+
+PANEL_PASS=$(grep "^PANEL_ADMIN_PASSWORD=" .env | cut -d'=' -f2 | xargs)
+if [ -z "$PANEL_PASS" ]; then
+    echo -e "${YELLOW}请设置管理面板的管理员密码 (PANEL_ADMIN_PASSWORD): ${NC}"
+    read -r INPUT_PASS
+    if [ -z "$INPUT_PASS" ]; then
+        INPUT_PASS=$(generate_secret | cut -c1-12)
+        echo -e "${YELLOW}未输入密码，已自动生成临时密码: ${INPUT_PASS}${NC}"
+    fi
+    update_env "PANEL_ADMIN_PASSWORD" "$INPUT_PASS"
+fi
+
+SESSION_SECRET=$(grep "^PANEL_SESSION_SECRET=" .env | cut -d'=' -f2 | xargs)
+if [ -z "$SESSION_SECRET" ]; then
+    AUTO_SESSION=$(generate_secret)
+    update_env "PANEL_SESSION_SECRET" "$AUTO_SESSION"
+fi
+
+# 初始化 config.json (如果不存在)
+if [ ! -f "config.json" ]; then
+    echo -e "${YELLOW}正在创建基础 config.json...${NC}"
+    # 获取最新的 secret 保证一致性
+    CURRENT_SECRET=$(grep "^CLASH_API_SECRET=" .env | cut -d'=' -f2 | xargs)
+    cat > config.json <<EOF
+{
+  "log": {
+    "level": "info",
+    "timestamp": true
+  },
+  "inbounds": [
+    {
+      "type": "http",
+      "tag": "http-in",
+      "listen": "0.0.0.0",
+      "listen_port": 2080
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "direct",
+      "tag": "direct"
+    }
+  ],
+  "route": {
+    "final": "direct"
+  },
+  "experimental": {
+    "clash_api": {
+      "external_controller": "0.0.0.0:9020",
+      "secret": "${CURRENT_SECRET}",
+      "default_mode": "rule"
+    }
+  }
+}
+EOF
+fi
+
+# 4. 启动服务
+echo -e "${GREEN}>>> 正在拉取镜像并启动容器服务...${NC}"
+sudo $DOCKER_COMPOSE --profile panel up -d
+
+# 5. 状态检查与输出
 if [ $? -eq 0 ]; then
-    echo "------------------------------------------------"
-    echo "部署成功！"
-    echo "代理端口: 2080 (HTTP)"
-    echo "测试命令: curl -x http://127.0.0.1:2080 https://www.google.com -I"
-    echo "------------------------------------------------"
+    # 尝试获取公网 IP
+    IP_ADDR=$(curl -s --max-time 3 https://api64.ipify.org || curl -s --max-time 3 https://ifconfig.me || echo "您的服务器IP")
+    
+    echo -e "\n${GREEN}================================================${NC}"
+    echo -e "${GREEN}部署成功！网枢 NetHub 已准备就绪。${NC}"
+    echo -e "------------------------------------------------"
+    echo -e "管理面板地址: ${YELLOW}http://${IP_ADDR}:8080${NC}"
+    echo -e "管理员账号:   ${YELLOW}$(grep "^PANEL_ADMIN_USER=" .env | cut -d'=' -f2 | xargs || echo "admin")${NC}"
+    echo -e "管理员密码:   ${YELLOW}$(grep "^PANEL_ADMIN_PASSWORD=" .env | cut -d'=' -f2 | xargs)${NC}"
+    echo -e "------------------------------------------------"
+    echo -e "HTTP 代理端口: ${YELLOW}2080${NC}"
+    echo -e "测试命令: curl -x http://127.0.0.1:2080 https://www.google.com -I"
+    echo -e "------------------------------------------------"
+    echo -e "常用管理命令:"
+    echo -e "  查看实时日志: sudo $DOCKER_COMPOSE logs -f"
+    echo -e "  重启所有服务: sudo $DOCKER_COMPOSE --profile panel restart"
+    echo -e "  停止并卸载:   sudo $DOCKER_COMPOSE --profile panel down"
+    echo -e "${GREEN}================================================${NC}"
 else
-    echo "部署失败，请执行 'docker compose logs' 查看原因。"
+    echo -e "${RED}部署失败，请执行 'sudo $DOCKER_COMPOSE logs' 查看原因。${NC}"
 fi
