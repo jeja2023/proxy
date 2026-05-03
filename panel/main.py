@@ -623,34 +623,41 @@ async def api_proxies(request: Request):
 async def api_selector_summary(request: Request):
     login_required(request)
     panel_audit(f"查看节点列表（分组 {SELECTOR_TAG}）", request=request, op="查看节点")
-    r = await clash_request("GET", "/proxies")
-    if r.status_code == 404:
-        r = await clash_request("GET", "/v1/proxies")
-    if not r.is_success:
+    try:
+        r = await clash_request("GET", "/proxies")
+        if r.status_code == 404:
+            r = await clash_request("GET", "/v1/proxies")
+        if not r.is_success:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Clash API 返回 {r.status_code}: {r.text[:500]}",
+            )
+        data = r.json()
+    except (httpx.RequestError, json.JSONDecodeError) as e:
+        logger.error("连接内核 API 失败: %s", e)
         raise HTTPException(
-            status_code=502,
-            detail=f"Clash API 返回 {r.status_code}: {r.text[:500]}",
+            status_code=503,
+            detail=f"无法从内核获取数据，请检查内核是否正常运行。错误: {e}",
         )
-    data = r.json()
+
     proxies = data.get("proxies") or {}
     sel = proxies.get(SELECTOR_TAG)
-    if not sel:
+    if not isinstance(sel, dict):
         sample = ", ".join(list(proxies.keys())[:15])
         raise HTTPException(
             status_code=404,
-            detail=f"未找到分组 {SELECTOR_TAG}。已有 keys（节选）: {sample or '（空）'}",
-        )
-    if str(sel.get("type") or "").casefold() != "selector":
-        raise HTTPException(
-            status_code=400,
-            detail=f"{SELECTOR_TAG} 类型为 {sel.get('type')!r}，需要 Selector",
+            detail=f"未找到有效分组 {SELECTOR_TAG}。已有 keys: {sample or '（空）'}",
         )
 
-    all_nodes = sel.get("all") or []
+    all_nodes = sel.get("all")
+    if not isinstance(all_nodes, list):
+        all_nodes = []
+
     enabled_vaults = set(_enabled_vault_names())
-    # 过滤掉未启用库的节点。节点名格式由 _annotate_url_with_vault 定义为 "库名 · 节点名"
     filtered_nodes = []
     for node in all_nodes:
+        if not isinstance(node, str):
+            continue
         if " · " in node:
             v_name = node.split(" · ")[0]
             if v_name in enabled_vaults:
@@ -660,7 +667,7 @@ async def api_selector_summary(request: Request):
 
     return {
         "tag": SELECTOR_TAG,
-        "now": sel.get("now"),
+        "now": str(sel.get("now") or ""),
         "all": filtered_nodes,
     }
 

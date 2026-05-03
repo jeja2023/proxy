@@ -114,12 +114,24 @@ if [ ! -f "config.json" ]; then
   ],
   "outbounds": [
     {
+      "type": "selector",
+      "tag": "代理选择",
+      "outbounds": ["direct"],
+      "default": "direct"
+    },
+    {
       "type": "direct",
       "tag": "direct"
     }
   ],
   "route": {
-    "final": "direct"
+    "rules": [
+      {
+        "inbound": ["http-in"],
+        "outbound": "代理选择"
+      }
+    ],
+    "final": "代理选择"
   },
   "experimental": {
     "clash_api": {
@@ -131,6 +143,13 @@ if [ ! -f "config.json" ]; then
 }
 EOF
 fi
+
+# 3.5 权限修复 (针对 Docker 容器内的 UID 10001)
+echo -e "${GREEN}>>> 修复目录权限...${NC}"
+mkdir -p data/vaults
+# 统一将数据目录和配置文件所有权交给容器内的非 root 用户 (UID 10001)
+sudo chown -R 10001:10001 data config.json || true
+sudo chmod -R 775 data config.json || true
 
 # 4. 启动服务
 echo -e "${GREEN}>>> 正在拉取镜像并启动容器服务...${NC}"
