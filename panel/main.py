@@ -254,6 +254,18 @@ def _rebuild_config_from_vaults(vault_password: str, clash_secret: str | None = 
         write_singbox_config(cfg, CONFIG_FILE)
         marker = DATA_DIR / ".config_revision"
         marker.write_text(str(CONFIG_FILE.stat().st_mtime_ns), encoding="utf-8")
+        
+        # 尝试通过 Clash API 通知内核热重载
+        import httpx
+        from urllib.parse import quote
+        url = f"{CLASH_API_URL.rstrip('/')}/configs"
+        headers = {"Authorization": f"Bearer {os.environ.get('CLASH_API_SECRET', '').strip()}"}
+        # {"force": True} 触发重载
+        with httpx.Client() as client:
+            try:
+                client.put(url, headers=headers, json={"force": True}, timeout=3.0)
+            except Exception:
+                pass
     except OSError as e:
         raise HTTPException(status_code=500, detail=f"写入 config.json 失败: {e}") from e
     return len(all_urls)
