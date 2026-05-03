@@ -42,6 +42,8 @@ services:
       PYTHONPATH: /app
       CLASH_API_URL: http://proxy-bridge:9020
       CLASH_API_SECRET: ${CLASH_API_SECRET:-}
+      SINGBOX_WITH_PANEL: 1
+      SINGBOX_CLASH_API: 1
       PANEL_ADMIN_USER: ${PANEL_ADMIN_USER:-admin}
       PANEL_ADMIN_PASSWORD: ${PANEL_ADMIN_PASSWORD:-}
       PANEL_SESSION_SECRET: ${PANEL_SESSION_SECRET:-nethub-panel-secret-change-me}
