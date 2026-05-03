@@ -104,9 +104,9 @@ def parse_vless(parsed: urllib.parse.ParseResult, query: dict, tag: str) -> dict
         "uuid": urllib.parse.unquote(parsed.username) if parsed.username else "",
         "tls": {
             "enabled": True,
-            "server_name": _first(query, "sni", ""),
+            "server_name": _first(query, "sni", parsed.hostname or ""),
             "reality": {
-                "enabled": True,
+                "enabled": bool(_first(query, "pbk", "")),
                 "public_key": _first(query, "pbk", ""),
                 "short_id": _first(query, "sid", ""),
             },

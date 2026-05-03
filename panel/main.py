@@ -258,7 +258,7 @@ def _rebuild_config_from_vaults(vault_password: str, clash_secret: str | None = 
         # 尝试通过 Clash API 通知内核热重载
         import httpx
         from urllib.parse import quote
-        url = f"{CLASH_API_URL.rstrip('/')}/configs"
+        url = f"{CLASH_BASE}/configs"
         headers = {"Authorization": f"Bearer {os.environ.get('CLASH_API_SECRET', '').strip()}"}
         # {"force": True} 触发重载
         with httpx.Client() as client:
@@ -317,7 +317,15 @@ def _read_audit_jsonl_tail(path: Path, max_lines: int) -> list[dict[str, str]]:
 
 
 def _client_ip(request: Request | None) -> str:
-    if not request or not request.client:
+    if not request:
+        return "-"
+    # 优先从 Cloudflare 特有头或通用转发头获取真实 IP
+    for header in ("cf-connecting-ip", "x-forwarded-for", "x-real-ip"):
+        val = request.headers.get(header)
+        if val:
+            # x-forwarded-for 可能包含多个 IP，取第一个最真实的
+            return val.split(",")[0].strip()
+    if not request.client:
         return "-"
     return request.client.host or "-"
 
