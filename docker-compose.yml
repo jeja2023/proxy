@@ -33,7 +33,7 @@ services:
     container_name: nethub-panel
     restart: always
     ports:
-      - "8080:8080"
+      - "${PANEL_PORT:-8080}:8080"
     volumes:
       # 与 sing-box 共用宿主机上的 config.json；面板可写则导入节点后会更新，需重启 proxy-bridge 加载
       - ./config.json:/app/config.json

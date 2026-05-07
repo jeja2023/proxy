@@ -65,6 +65,7 @@ def main() -> int:
         return 1
 
     public_port = env.get("SINGBOX_HTTP_PORT") or "2080"
+    panel_port = env.get("PANEL_PORT") or "8080"
     listen = http_inbound.get("listen") or ""
     internal_port = str(http_inbound.get("listen_port") or "")
     has_auth = bool(http_inbound.get("users"))
@@ -106,8 +107,8 @@ def main() -> int:
     print("建议执行的服务器检查命令:")
     print(f"  docker compose --profile panel up -d --force-recreate")
     print(f"  curl -x http://127.0.0.1:{public_port} http://example.com -I")
-    print(f"  ss -lntp | grep -E '(:{public_port}|:8080)'")
-    print(f"  请在防火墙/安全组中放行以下 TCP 端口: {public_port}, 8080")
+    print(f"  ss -lntp | grep -E '(:{public_port}|:{panel_port})'")
+    print(f"  请在防火墙/安全组中放行以下 TCP 端口: {public_port}, {panel_port}")
     return 0
 
 

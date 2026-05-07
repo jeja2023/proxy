@@ -93,6 +93,44 @@ if [ -z "$SESSION_SECRET" ]; then
     update_env "PANEL_SESSION_SECRET" "$AUTO_SESSION"
 fi
 
+# 提示用户配置 HTTP 代理的公网端口
+PROXY_PORT=$(grep "^SINGBOX_HTTP_PORT=" .env | cut -d'=' -f2 | xargs)
+if [ -z "$PROXY_PORT" ]; then
+    echo -e "${YELLOW}请输入 HTTP 代理外网宿主机端口 (默认 2080，强烈建议改为高位随机端口如 34567 以增强安全性防扫描): ${NC}"
+    read -r INPUT_PORT
+    if [ -z "$INPUT_PORT" ]; then
+        INPUT_PORT="2080"
+        echo -e "${YELLOW}未输入端口，已使用默认端口: ${INPUT_PORT}${NC}"
+    else
+        if [[ "$INPUT_PORT" =~ ^[0-9]+$ ]] && [ "$INPUT_PORT" -ge 1 ] && [ "$INPUT_PORT" -le 65535 ]; then
+            echo -e "${GREEN}HTTP 代理外网端口已设置为: ${INPUT_PORT}${NC}"
+        else
+            echo -e "${RED}输入不是合法的端口号 (1-65535)，将退回使用默认端口: 2080${NC}"
+            INPUT_PORT="2080"
+        fi
+    fi
+    update_env "SINGBOX_HTTP_PORT" "$INPUT_PORT"
+fi
+
+# 提示用户配置管理面板的外网端口
+PANEL_PORT=$(grep "^PANEL_PORT=" .env | cut -d'=' -f2 | xargs)
+if [ -z "$PANEL_PORT" ]; then
+    echo -e "${YELLOW}请输入管理面板外网访问端口 (默认 8080，建议修改为高位随机端口如 45678 以提升保密性): ${NC}"
+    read -r INPUT_PANEL_PORT
+    if [ -z "$INPUT_PANEL_PORT" ]; then
+        INPUT_PANEL_PORT="8080"
+        echo -e "${YELLOW}未输入端口，已使用默认端口: ${INPUT_PANEL_PORT}${NC}"
+    else
+        if [[ "$INPUT_PANEL_PORT" =~ ^[0-9]+$ ]] && [ "$INPUT_PANEL_PORT" -ge 1 ] && [ "$INPUT_PANEL_PORT" -le 65535 ]; then
+            echo -e "${GREEN}管理面板外网端口已设置为: ${INPUT_PANEL_PORT}${NC}"
+        else
+            echo -e "${RED}输入不是合法的端口号 (1-65535)，将退回使用默认端口: 8080${NC}"
+            INPUT_PANEL_PORT="8080"
+        fi
+    fi
+    update_env "PANEL_PORT" "$INPUT_PANEL_PORT"
+fi
+
 # 初始化 config.json (如果不存在)
 if [ ! -f "config.json" ]; then
     echo -e "${YELLOW}正在创建基础 config.json...${NC}"
@@ -147,7 +185,7 @@ fi
 # 3.5 权限修复 (针对 Docker 容器内的 UID 10001)
 echo -e "${GREEN}>>> 修复目录权限...${NC}"
 mkdir -p data/vaults
-# 统一将数据目录和配置文件所有权交给容器内的非 root 用户 (UID 10001)
+# 统一将数据目录 and 配置文件所有权交给容器内的非 root 用户 (UID 10001)
 sudo chown -R 10001:10001 data config.json || true
 sudo chmod -R 775 data config.json || true
 
@@ -160,10 +198,15 @@ if [ $? -eq 0 ]; then
     # 尝试获取公网 IP
     IP_ADDR=$(curl -s --max-time 3 https://api64.ipify.org || curl -s --max-time 3 https://ifconfig.me || echo "您的服务器IP")
     
+    CURRENT_PANEL_PORT=$(grep "^PANEL_PORT=" .env | cut -d'=' -f2 | xargs || echo "8080")
+    if [ -z "$CURRENT_PANEL_PORT" ]; then
+        CURRENT_PANEL_PORT="8080"
+    fi
+
     echo -e "\n${GREEN}================================================${NC}"
     echo -e "${GREEN}部署成功！网枢 NetHub 已准备就绪。${NC}"
     echo -e "------------------------------------------------"
-    echo -e "管理面板地址: ${YELLOW}http://${IP_ADDR}:8080${NC}"
+    echo -e "管理面板地址: ${YELLOW}http://${IP_ADDR}:${CURRENT_PANEL_PORT}${NC}"
     echo -e "管理员账号:   ${YELLOW}$(grep "^PANEL_ADMIN_USER=" .env | cut -d'=' -f2 | xargs || echo "admin")${NC}"
     echo -e "管理员密码:   ${YELLOW}$(grep "^PANEL_ADMIN_PASSWORD=" .env | cut -d'=' -f2 | xargs)${NC}"
     echo -e "------------------------------------------------"
