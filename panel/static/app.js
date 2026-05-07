@@ -13,6 +13,7 @@
   let currentSelectorData = null;
   let trafficSSE = null;
   let subToken = "";
+  let csrfToken = "";
   let connsTimer = null;
   const trafficHistory = { up: [], down: [] };
   const MAX_TRAFFIC_POINTS = 30;
@@ -84,11 +85,17 @@
   async function api(path, opts = {}) {
     const showLoading = opts.loading;
     if (showLoading) setGlobalLoading(true, typeof showLoading === "string" ? showLoading : "处理中...");
+    const { headers: optHeaders, loading, ...fetchOpts } = opts;
+    const method = (fetchOpts.method || "GET").toUpperCase();
+    const headers = { "Content-Type": "application/json", ...(optHeaders || {}) };
+    if (csrfToken && !["GET", "HEAD", "OPTIONS"].includes(method)) {
+      headers["X-CSRF-Token"] = csrfToken;
+    }
     try {
       const r = await fetch(path, {
         credentials: "same-origin",
-        headers: { "Content-Type": "application/json", ...(opts.headers || {}) },
-        ...opts,
+        ...fetchOpts,
+        headers,
       });
       const text = await r.text();
       let data = null;
@@ -111,6 +118,27 @@
 
   function show(el, on) {
     el.classList.toggle("hidden", !on);
+  }
+
+  function setTableMessage(tbody, colspan, message, color = "var(--muted)") {
+    tbody.replaceChildren();
+    const tr = document.createElement("tr");
+    const td = document.createElement("td");
+    td.colSpan = colspan;
+    td.style.textAlign = "center";
+    td.style.color = color;
+    td.style.padding = "2rem";
+    td.textContent = message;
+    tr.appendChild(td);
+    tbody.appendChild(tr);
+  }
+
+  function appendText(parent, tag, text, styles = {}) {
+    const el = document.createElement(tag);
+    el.textContent = text == null ? "" : String(text);
+    Object.assign(el.style, styles);
+    parent.appendChild(el);
+    return el;
   }
 
   const TAB_KEY = "current_panel_tab";
@@ -170,25 +198,27 @@
     const searchVal = ($("conn-search") ? $("conn-search").value : "").trim().toLowerCase();
     try {
       if (!silent && !tbody.children.length) {
-        tbody.innerHTML = '<tr><td colspan="8" style="text-align: center; color: var(--muted); padding: 2rem;">正在拉取实时连接...</td></tr>';
+        setTableMessage(tbody, 8, "正在拉取实时连接...");
       }
       const res = await api("/api/connections");
       const list = res.connections || [];
       const filtered = list.filter(c => {
+        const metadata = c.metadata || {};
         if (!searchVal) return true;
-        const host = (c.metadata.host || "").toLowerCase();
-        const dstIp = (c.metadata.destinationIP || "").toLowerCase();
-        const srcIp = (c.metadata.sourceIP || "").toLowerCase();
+        const host = (metadata.host || "").toLowerCase();
+        const dstIp = (metadata.destinationIP || "").toLowerCase();
+        const srcIp = (metadata.sourceIP || "").toLowerCase();
         return host.includes(searchVal) || dstIp.includes(searchVal) || srcIp.includes(searchVal);
       });
       const badge = $("conns-count-badge");
       if (badge) badge.textContent = filtered.length;
-      tbody.innerHTML = "";
+      tbody.replaceChildren();
       if (!filtered.length) {
-        tbody.innerHTML = `<tr><td colspan="8" style="text-align: center; color: var(--muted); padding: 2rem;">${searchVal ? "没有找到符合搜索条件的活动连接" : "当前暂无活跃代理连接"}</td></tr>`;
+        setTableMessage(tbody, 8, searchVal ? "没有找到符合搜索条件的活动连接" : "当前暂无活跃代理连接");
         return;
       }
       filtered.forEach((c, idx) => {
+        const metadata = c.metadata || {};
         const tr = document.createElement("tr");
 
         // 序号列
@@ -199,26 +229,39 @@
         tr.appendChild(tdIdx);
 
         const tdType = document.createElement("td");
-        const network = (c.metadata.network || "TCP").toUpperCase();
-        const type = c.metadata.type || "";
-        tdType.innerHTML = `<span class="badge" style="font-size: 0.75rem; padding: 2px 6px; border-radius: 4px; font-weight: bold; background: ${network === "UDP" ? "#eab308" : "#3b82f6"}; color: #fff;">${network}</span><div style="font-size: 0.75rem; color: var(--muted); margin-top: 2px;">${type}</div>`;
+        const network = (metadata.network || "TCP").toUpperCase();
+        const type = metadata.type || "";
+        appendText(tdType, "span", network, {
+          fontSize: "0.75rem",
+          padding: "2px 6px",
+          borderRadius: "4px",
+          fontWeight: "bold",
+          background: network === "UDP" ? "#eab308" : "#3b82f6",
+          color: "#fff",
+        });
+        appendText(tdType, "div", type, { fontSize: "0.75rem", color: "var(--muted)", marginTop: "2px" });
         tr.appendChild(tdType);
 
         const tdSrc = document.createElement("td");
         tdSrc.style.fontFamily = "monospace";
         tdSrc.style.fontSize = "0.85rem";
-        tdSrc.textContent = `${c.metadata.sourceIP}:${c.metadata.sourcePort}`;
+        tdSrc.textContent = `${metadata.sourceIP || ""}:${metadata.sourcePort || ""}`;
         tr.appendChild(tdSrc);
 
         const tdDst = document.createElement("td");
         tdDst.style.fontWeight = "500";
-        const host = c.metadata.host;
-        const destIP = c.metadata.destinationIP;
-        const port = c.metadata.destinationPort;
+        const host = metadata.host;
+        const destIP = metadata.destinationIP || "";
+        const port = metadata.destinationPort || "";
         if (host) {
-          tdDst.innerHTML = `<div style="word-break: break-all;">${host}</div><div style="font-size: 0.75rem; color: var(--muted); font-family: monospace;">${destIP}:${port}</div>`;
+          appendText(tdDst, "div", host, { wordBreak: "break-all" });
+          appendText(tdDst, "div", `${destIP}:${port}`, {
+            fontSize: "0.75rem",
+            color: "var(--muted)",
+            fontFamily: "monospace",
+          });
         } else {
-          tdDst.innerHTML = `<span style="font-family: monospace; font-size: 0.85rem;">${destIP}:${port}</span>`;
+          appendText(tdDst, "span", `${destIP}:${port}`, { fontFamily: "monospace", fontSize: "0.85rem" });
         }
         tr.appendChild(tdDst);
 
@@ -229,14 +272,28 @@
         if (ruleName.toLowerCase().includes("direct") || ruleName.toLowerCase() === "match") ruleBg = "#10b981";
         else if (ruleName.toLowerCase().includes("reject") || ruleName.toLowerCase().includes("block")) ruleBg = "#ef4444";
         else if (ruleName.toLowerCase() !== "match") ruleBg = "var(--primary)";
-        tdRule.innerHTML = `<span style="display: inline-block; font-size: 0.75rem; padding: 2px 6px; border-radius: 4px; color: #fff; font-weight: 500; background: ${ruleBg};">${ruleName}</span><div style="font-size: 0.75rem; color: var(--muted); margin-top: 2px; word-break: break-all;">${payload}</div>`;
+        appendText(tdRule, "span", ruleName, {
+          display: "inline-block",
+          fontSize: "0.75rem",
+          padding: "2px 6px",
+          borderRadius: "4px",
+          color: "#fff",
+          fontWeight: "500",
+          background: ruleBg,
+        });
+        appendText(tdRule, "div", payload, {
+          fontSize: "0.75rem",
+          color: "var(--muted)",
+          marginTop: "2px",
+          wordBreak: "break-all",
+        });
         tr.appendChild(tdRule);
 
         const tdNode = document.createElement("td");
         tdNode.style.fontWeight = "500";
         const chain = c.chains || [];
         const outNodeName = chain[chain.length - 1] || "direct";
-        tdNode.innerHTML = `<span style="color: ${outNodeName === "direct" ? "var(--muted)" : "var(--primary)"};">${outNodeName}</span>`;
+        appendText(tdNode, "span", outNodeName, { color: outNodeName === "direct" ? "var(--muted)" : "var(--primary)" });
         tr.appendChild(tdNode);
 
         const tdTraffic = document.createElement("td");
@@ -272,7 +329,7 @@
       });
     } catch (e) {
       if (!silent) {
-        tbody.innerHTML = `<tr><td colspan="8" style="text-align: center; color: var(--danger); padding: 2rem;">加载连接失败: ${e.message || String(e)}</td></tr>`;
+        setTableMessage(tbody, 8, `加载连接失败: ${e.message || String(e)}`, "var(--danger)");
       }
     }
   }
@@ -389,6 +446,18 @@
     ddTier.className = tierClass(tier);
   }
 
+  function setCardHealth(card, health) {
+    const el = card && card.querySelector(".node-m-health");
+    if (!el) return;
+    if (!health || health.score == null) {
+      el.textContent = "未知";
+      el.className = "node-m-health is-warn";
+      return;
+    }
+    el.textContent = `${health.score} · ${health.tier || "健康"}`;
+    el.className = health.score >= 70 ? "node-m-health" : health.score >= 45 ? "node-m-health is-warn" : "node-m-health is-bad";
+  }
+
   function buildNodeCard(name, nowName) {
     const art = document.createElement("article");
     art.className = "node-card" + (name === nowName ? " node-card--current" : "");
@@ -455,6 +524,21 @@
     row.appendChild(sep);
     row.appendChild(itemTier);
     metrics.appendChild(row);
+
+    const rowHealth = document.createElement("div");
+    rowHealth.className = "node-m-row";
+    const itemHealth = document.createElement("span");
+    itemHealth.className = "node-m-item";
+    const labHealth = document.createElement("span");
+    labHealth.className = "node-m-lab";
+    labHealth.textContent = "健康";
+    const ddHealth = document.createElement("span");
+    ddHealth.className = "node-m-health is-warn";
+    ddHealth.textContent = "未知";
+    itemHealth.appendChild(labHealth);
+    itemHealth.appendChild(ddHealth);
+    rowHealth.appendChild(itemHealth);
+    metrics.appendChild(rowHealth);
     art.appendChild(metrics);
 
     return art;
@@ -490,13 +574,16 @@
           card.classList.remove("is-testing");
           if (info.error) {
             setCardMetrics(card, "失败", "—", info.error);
+            setCardHealth(card, info.health);
             updateSpeedCache(name, "失败", "—", info.error);
           } else if (info.delay_ms != null) {
             const dText = `${info.delay_ms} ms`;
             setCardMetrics(card, dText, info.tier || "—", null);
+            setCardHealth(card, info.health);
             updateSpeedCache(name, dText, info.tier || "—", null);
           } else {
             setCardMetrics(card, "—", info.tier || "—", info.error || "超时");
+            setCardHealth(card, info.health);
             updateSpeedCache(name, "—", info.tier || "—", info.error || "超时");
           }
         }
@@ -590,6 +677,7 @@
     for (const name of filtered) {
       const card = buildNodeCard(name, now);
       wrap.appendChild(card);
+      setCardHealth(card, data.health && data.health[name]);
 
       const cached = cache[name];
       // 24小时内有效
@@ -604,6 +692,7 @@
   async function loadMeta() {
     const m = await api("/api/meta");
     selectorTag = m.selector_tag || selectorTag;
+    csrfToken = m.csrf_token || csrfToken;
     currentMeta = m;
     
     // 填充路由模式
@@ -752,7 +841,10 @@
       subToken = s.sub_token || "";
       const total = typeof s.vault_count === "number" ? s.vault_count : (s.vaults || []).length;
       const enabled = typeof s.enabled_count === "number" ? s.enabled_count : total;
-      el.textContent = s.has_vault ? `已存在节点库 ${total} 个（启用 ${enabled} 个）` : "尚未导入节点库";
+      const subscriptionCount = (s.vaults || []).filter((v) => v.source_kind === "subscription" && v.source_url).length;
+      el.textContent = s.has_vault
+        ? `已存在节点库 ${total} 个（启用 ${enabled} 个，订阅源 ${subscriptionCount} 个）`
+        : "尚未导入节点库";
     } catch (e) {
       if (e.status === 401) {
         window.location.href = "/login";
@@ -978,10 +1070,27 @@
 
         // 3. 节点数量
         const tdCount = document.createElement("td");
-        tdCount.textContent = v.node_count || 0;
         tdCount.style.textAlign = "center";
         tdCount.style.fontWeight = "600";
         tdCount.style.color = "var(--primary)";
+        tdCount.dataset.count = String(v.node_count || 0);
+        tdCount.textContent = v.node_count || 0;
+        if (typeof v.duplicate_count === "number" && v.duplicate_count > 0) {
+          appendText(tdCount, "div", `去重 ${v.duplicate_count} 条`, {
+            marginTop: "2px",
+            fontSize: "0.72rem",
+            color: "var(--muted)",
+            fontWeight: "400",
+          });
+        }
+        if (v.source_kind === "subscription" && v.source_url) {
+          appendText(tdCount, "div", "订阅刷新", {
+            marginTop: "2px",
+            fontSize: "0.72rem",
+            color: "#0f766e",
+            fontWeight: "500",
+          });
+        }
 
         // 4. 节点管理
         const tdNodeManage = document.createElement("td");
@@ -1001,6 +1110,13 @@
 
         grpNode.appendChild(btnImp);
         grpNode.appendChild(btnView);
+        if (v.source_kind === "subscription" && v.source_url) {
+          const btnRefresh = document.createElement("button");
+          btnRefresh.type = "button";
+          btnRefresh.className = "btn-secondary btn-mini vault-refresh";
+          btnRefresh.textContent = "刷新";
+          grpNode.appendChild(btnRefresh);
+        }
         tdNodeManage.appendChild(grpNode);
 
         // 5. 启用 (Switch)
@@ -1049,7 +1165,7 @@
         tbody.appendChild(tr);
       }
     } catch (e) {
-      tbody.innerHTML = '<tr><td colspan="4">无法加载节点库列表: ' + e.message + "</td></tr>";
+      setTableMessage(tbody, 6, `无法加载节点库列表: ${e.message || String(e)}`, "var(--danger)");
     }
   }
 
@@ -1227,6 +1343,7 @@
               });
               renderVaultNodesList(vaultName, nextUrls, password);
               await loadVaultStatus();
+              await renderVaultManageTable();
             } catch (e) {
               showConfirmModal({
                 title: "同步失败",
@@ -1567,9 +1684,10 @@
       tbody.addEventListener("click", async (ev) => {
         const btnImp = ev.target.closest && ev.target.closest(".vault-import");
         const btnView = ev.target.closest && ev.target.closest(".vault-view");
+        const btnRefresh = ev.target.closest && ev.target.closest(".vault-refresh");
         const btnRen = ev.target.closest && ev.target.closest(".vault-rename");
         const btnDel = ev.target.closest && ev.target.closest(".vault-delete");
-        if (!btnImp && !btnView && !btnRen && !btnDel) return;
+        if (!btnImp && !btnView && !btnRefresh && !btnRen && !btnDel) return;
         const tr = ev.target.closest("tr");
         if (!tr) return;
         const name = tr.dataset.name;
@@ -1616,6 +1734,33 @@
         }
         if (btnView) {
           await viewVaultNodes(name);
+          return;
+        }
+        if (btnRefresh) {
+          const pw = await verifyVaultPassword(name, "刷新订阅", `刷新节点库“${name}”需要验证密码：`);
+          if (!pw) return;
+          try {
+            const r = await api("/api/vault/refresh", {
+              method: "POST",
+              body: JSON.stringify({ name, password: pw }),
+              loading: "正在刷新订阅...",
+            });
+            const msg = $("vault-msg");
+            if (msg) {
+              show(msg, true);
+              msg.classList.remove("err");
+              msg.textContent = `刷新完成：写入 ${r.node_count} 条，去重 ${r.duplicate_count || 0} 条，合计 ${r.total_count} 条。`;
+            }
+            await loadVaultStatus();
+            await renderVaultManageTable();
+          } catch (e) {
+            const msg = $("vault-msg");
+            if (msg) {
+              show(msg, true);
+              msg.classList.add("err");
+              msg.textContent = typeof e.data?.detail === "string" ? e.data.detail : e.message || "刷新失败";
+            }
+          }
           return;
         }
 
@@ -1803,13 +1948,47 @@
           body: JSON.stringify(body),
           loading: "正在处理并重构...",
         });
-        msg.textContent = `成功：写入 ${r.node_count} 条；合计 ${r.total_count} 条；配置已热重载。`;
+        msg.textContent = `成功：写入 ${r.node_count} 条，去重 ${r.duplicate_count || 0} 条；合计 ${r.total_count} 条；配置已热重载。`;
         await loadVaultStatus();
+        await renderVaultManageTable();
         hideModal("modal-import-manual");
         if ($("vault-urls")) $("vault-urls").value = "";
       } catch (e) {
         msg.classList.add("err");
         msg.textContent = typeof e.data?.detail === "string" ? e.data.detail : e.message || "导入失败";
+      }
+    });
+  }
+
+  const btnPreviewImport = $("btn-preview-vault-import");
+  if (btnPreviewImport) {
+    btnPreviewImport.addEventListener("click", async () => {
+      const msg = $("vault-msg");
+      const vaultName = currentImportVault || getVaultTarget();
+      const pw = currentImportPassword;
+      if (!pw) {
+        show(msg, true);
+        msg.classList.add("err");
+        msg.textContent = "身份验证失效，请重新点击导入。";
+        return;
+      }
+      try {
+        const r = await api("/api/vault/preview", {
+          method: "POST",
+          body: JSON.stringify({
+            vault_password: pw,
+            urls_text: $("vault-urls").value,
+            vault_name: vaultName,
+          }),
+          loading: "正在预览变更...",
+        });
+        show(msg, true);
+        msg.classList.remove("err");
+        msg.textContent = `预览：新增 ${r.added_count} 条，移除 ${r.removed_count} 条，保留 ${r.unchanged_count} 条，重复 ${r.duplicate_count} 条。`;
+      } catch (e) {
+        show(msg, true);
+        msg.classList.add("err");
+        msg.textContent = typeof e.data?.detail === "string" ? e.data.detail : e.message || "预览失败";
       }
     });
   }
@@ -1842,8 +2021,9 @@
         body: JSON.stringify(body),
         loading: "正在拉取订阅并处理...",
       });
-      msg.textContent = `订阅导入成功：写入 ${r.node_count} 条；合计 ${r.total_count} 条；运行配置已更新。`;
+      msg.textContent = `订阅导入成功：写入 ${r.node_count} 条，去重 ${r.duplicate_count || 0} 条；合计 ${r.total_count} 条；运行配置已更新。`;
       await loadVaultStatus();
+      await renderVaultManageTable();
       hideModal("modal-import-sub");
       if ($("vault-subscription-url")) $("vault-subscription-url").value = "";
     } catch (e) {

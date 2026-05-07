@@ -6,8 +6,10 @@
 
 *   **全协议支持**：轻松桥接 VLESS (Reality), Hysteria2, TUIC 等主流协议。
 *   **指挥中心看板**：全新的可视化控制面板，支持实时网速图表、流量统计。
+*   **节点健康评分**：测速结果会沉淀为健康分，帮助识别高延迟或不稳定出口。
 *   **智能分流路由**：支持“绕过大陆”、“广告拦截”等高级路由模式，一键重构内核规则。
 *   **统一订阅源**：支持将聚合后的节点库导出为标准的 Clash 订阅链接。
+*   **订阅源维护**：订阅导入会自动去重并记录来源，支持变更预览、手动刷新与可选后台刷新。
 *   **安全性设计**：支持节点加密库（Vault），敏感链接不落盘，全流程本地化安全处理。
 *   **极简部署**：一键脚本启动，支持容器化（Docker）与直接运行。
 
@@ -55,6 +57,9 @@ docker compose --profile panel up -d
 *   **手动生成配置**：`python scripts/generate_singbox.py`
 *   **验证代理状态**：`curl -x http://127.0.0.1:2080 https://www.google.com -I`
 *   **查看系统日志**：可通过 Web 面板实时查看，或直接查阅 `data/panel_audit.jsonl`。
+*   **生产依赖锁定**：容器构建默认使用 `requirements.lock`；本地开发仍可使用 `requirements.txt`。
+*   **配置模板覆盖**：设置 `SINGBOX_TEMPLATE_PATH=/path/to/template.json` 可对生成的 sing-box 配置做 JSON 深度覆盖。
+*   **订阅后台刷新**：设置 `VAULT_PASSWORD` 与 `PANEL_SUB_REFRESH_INTERVAL_MIN` 后，面板会按间隔刷新记录过来源的订阅库。
 
 ## ⚠️ 安全提示
 

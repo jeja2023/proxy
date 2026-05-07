@@ -9,11 +9,12 @@ import ipaddress
 import json
 import logging
 import os
+import secrets
 import socket
 import sys
 from collections import deque
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from threading import Lock
 from urllib.parse import quote
@@ -29,6 +30,7 @@ from pydantic import BaseModel, Field
 from starlette.middleware.sessions import SessionMiddleware
 
 from login_rate_limit import clear_login_failures, login_failures_exceeded, record_login_failure
+from health_store import NodeHealthStore
 from middleware import RequestIdMiddleware, SecurityHeadersMiddleware
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -37,7 +39,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from core.env import load_repo_dotenv as _load_dotenv_fn
-from core.build_config import NodeBuildError, build_singbox_config, write_singbox_config, parse_urls_text, ROUTE_MODES
+from core.build_config import NodeBuildError, build_singbox_config, dedupe_urls, write_singbox_config, parse_urls_text, ROUTE_MODES
 from core.vault_store import decrypt_vault_file, encrypt_vault_file
 
 _load_dotenv_fn(REPO_ROOT)
@@ -53,6 +55,7 @@ DEFAULT_DELAY_TEST_URL = os.environ.get(
     "PANEL_DELAY_TEST_URL",
     "https://www.gstatic.com/generate_204",
 ).strip()
+_CSRF_SESSION_KEY = "csrf_token"
 
 CLASH_BASE = os.environ.get("CLASH_API_URL", "http://127.0.0.1:9020").rstrip("/")
 CLASH_SECRET = os.environ.get("CLASH_API_SECRET", "").strip()
@@ -92,6 +95,7 @@ PANEL_AUDIT_LOG_MAX = max(50, min(5000, _audit_max_raw))
 AUDIT_LOG_FILE = Path(
     os.environ.get("PANEL_AUDIT_LOG_PATH", str(DATA_DIR / "panel_audit.jsonl"))
 ).resolve()
+HEALTH_STORE = NodeHealthStore(DATA_DIR / "node_health.json")
 try:
     _audit_read_chunk = max(65536, int(os.environ.get("PANEL_AUDIT_READ_CHUNK", "2097152").strip()))
 except ValueError:
@@ -183,7 +187,12 @@ def _list_vaults() -> list[dict]:
             "name": name,
             "enabled": enabled,
             "exists": path.is_file(),
-            "node_count": node_count
+            "node_count": node_count,
+            "unique_count": int(v.get("unique_count", node_count)),
+            "duplicate_count": int(v.get("duplicate_count", 0)),
+            "source_url": (v.get("source_url") or "").strip(),
+            "source_kind": (v.get("source_kind") or "").strip(),
+            "last_import_at": (v.get("last_import_at") or "").strip(),
         })
     return out
 
@@ -192,14 +201,21 @@ def _enabled_vault_names() -> list[str]:
     return [v["name"] for v in _list_vaults() if v.get("enabled")]
 
 
-def _update_vault_node_count(name: str, count: int) -> None:
+def _update_vault_record(name: str, **changes) -> None:
     idx = _read_vault_index()
     vaults = idx.get("vaults") or []
+    changed = False
     for v in vaults:
         if isinstance(v, dict) and v.get("name") == name:
-            v["node_count"] = count
-    idx["vaults"] = vaults
-    _write_vault_index(idx)
+            v.update(changes)
+            changed = True
+    if changed:
+        idx["vaults"] = vaults
+        _write_vault_index(idx)
+
+
+def _update_vault_node_count(name: str, count: int) -> None:
+    _update_vault_record(name, node_count=count)
 
 
 def _annotate_url_with_vault(url: str, vault_name: str) -> str:
@@ -215,6 +231,63 @@ def _annotate_url_with_vault(url: str, vault_name: str) -> str:
     base = frag.strip() or "node"
     new_frag = f"{vault_name} · {base}"
     return p._replace(fragment=new_frag).geturl()
+
+
+def _now_iso() -> str:
+    return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _store_vault_import_metadata(
+    vault_name: str,
+    *,
+    source_url: str = "",
+    source_kind: str = "",
+    unique_count: int,
+    duplicate_count: int,
+) -> None:
+    changes = {
+        "node_count": unique_count,
+        "unique_count": unique_count,
+        "duplicate_count": duplicate_count,
+        "last_import_at": _now_iso(),
+    }
+    if source_url:
+        changes["source_url"] = source_url
+    else:
+        changes["source_url"] = ""
+    if source_kind:
+        changes["source_kind"] = source_kind
+    else:
+        changes["source_kind"] = ""
+    _update_vault_record(vault_name, **changes)
+
+
+def _import_vault_urls(
+    vault_name: str,
+    vault_password: str,
+    urls: list[str],
+    *,
+    source_url: str = "",
+    source_kind: str = "",
+    clash_secret: str | None = None,
+) -> tuple[int, int, int]:
+    unique_urls, duplicate_count = dedupe_urls(urls)
+    if not unique_urls:
+        raise HTTPException(status_code=400, detail="未解析到任何有效节点")
+    vault_path = _vault_path(vault_name)
+    try:
+        encrypt_vault_file(unique_urls, vault_password, vault_path)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"写入加密库失败: {e}") from e
+    total = _rebuild_config_from_vaults(vault_password, clash_secret)
+    _store_vault_import_metadata(
+        vault_name,
+        source_url=source_url,
+        source_kind=source_kind,
+        unique_count=len(unique_urls),
+        duplicate_count=duplicate_count,
+    )
+    return len(unique_urls), duplicate_count, total
 
 
 def _rebuild_config_from_vaults(vault_password: str, clash_secret: str | None = None, route_mode: str = "bypass_cn") -> int:
@@ -384,20 +457,20 @@ def _is_private_or_loopback_ip(ip: ipaddress._BaseAddress) -> bool:  # type: ign
     )
 
 
-def _validate_subscription_url(url: str) -> None:
+def _validate_public_http_url(url: str, *, label: str) -> str:
     u = (url or "").strip()
     if not u:
-        raise HTTPException(status_code=400, detail="订阅链接不能为空")
+        raise HTTPException(status_code=400, detail=f"{label}不能为空")
     if len(u) > 2048:
-        raise HTTPException(status_code=400, detail="订阅链接过长")
+        raise HTTPException(status_code=400, detail=f"{label}过长")
     parsed = urlparse(u)
     if parsed.scheme not in ("http", "https"):
-        raise HTTPException(status_code=400, detail="仅支持 http / https 订阅链接")
+        raise HTTPException(status_code=400, detail=f"仅支持 http / https {label}")
     host = (parsed.hostname or "").strip()
     if not host:
-        raise HTTPException(status_code=400, detail="订阅链接缺少 host")
+        raise HTTPException(status_code=400, detail=f"{label}缺少 host")
     if host.lower() in ("localhost",):
-        raise HTTPException(status_code=400, detail="不允许使用 localhost 订阅链接")
+        raise HTTPException(status_code=400, detail=f"不允许使用 localhost {label}")
     # SSRF 基础防护：若能解析到内网/回环 IP，则拒绝
     try:
         infos = socket.getaddrinfo(host, parsed.port or (443 if parsed.scheme == "https" else 80))
@@ -408,12 +481,21 @@ def _validate_subscription_url(url: str) -> None:
             except ValueError:
                 continue
             if _is_private_or_loopback_ip(ip):
-                raise HTTPException(status_code=400, detail="订阅链接不允许指向内网地址")
+                raise HTTPException(status_code=400, detail=f"{label}不允许指向内网地址")
     except HTTPException:
         raise
     except Exception:
         # DNS 解析异常：交由 httpx 处理，避免误伤；但仍会有超时限制
         pass
+    return u
+
+
+def _validate_subscription_url(url: str) -> str:
+    return _validate_public_http_url(url, label="订阅链接")
+
+
+def _validate_delay_test_url(url: str) -> str:
+    return _validate_public_http_url(url, label="测速地址")
 
 
 def _decode_subscription_payload(text: str) -> str:
@@ -436,6 +518,73 @@ def _decode_subscription_payload(text: str) -> str:
     return raw
 
 
+async def _fetch_subscription_content(url: str) -> bytes:
+    """Fetch a subscription while validating every redirect target."""
+    current = _validate_subscription_url(url)
+    headers = {"User-Agent": "ProxyBridgePanel/1.0"}
+    async with httpx.AsyncClient(timeout=_SUBSCRIPTION_TIMEOUT, follow_redirects=False) as client:
+        for _ in range(6):
+            try:
+                r = await client.get(current, headers=headers)
+            except httpx.RequestError as e:
+                raise HTTPException(status_code=502, detail=f"拉取订阅失败: {e}") from e
+            if r.status_code in (301, 302, 303, 307, 308):
+                loc = r.headers.get("location", "").strip()
+                if not loc:
+                    raise HTTPException(status_code=502, detail="订阅服务器返回重定向但缺少 Location")
+                current = _validate_subscription_url(str(r.url.join(loc)))
+                continue
+            if not r.is_success:
+                raise HTTPException(status_code=502, detail=f"订阅服务器返回 HTTP {r.status_code}")
+            content = r.content or b""
+            if len(content) > _SUBSCRIPTION_MAX_BYTES:
+                raise HTTPException(status_code=413, detail="订阅内容过大，请拆分或调小订阅范围")
+            return content
+    raise HTTPException(status_code=502, detail="订阅重定向次数过多")
+
+
+async def _refresh_subscription_vaults_once(vault_password: str, clash_secret: str | None = None) -> dict:
+    refreshed = 0
+    failed: list[str] = []
+    for v in _list_vaults():
+        if v.get("source_kind") != "subscription" or not v.get("source_url"):
+            continue
+        name = str(v["name"])
+        try:
+            content = await _fetch_subscription_content(str(v["source_url"]))
+            decoded_text = _decode_subscription_payload(content.decode("utf-8", errors="replace"))
+            urls = parse_urls_text(decoded_text)
+            _import_vault_urls(
+                name,
+                vault_password,
+                urls,
+                source_url=str(v["source_url"]),
+                source_kind="subscription",
+                clash_secret=clash_secret,
+            )
+            refreshed += 1
+        except Exception as e:
+            logger.warning("刷新订阅节点库失败 %s: %s", name, e)
+            failed.append(name)
+    return {"refreshed": refreshed, "failed": failed}
+
+
+async def _subscription_refresh_loop() -> None:
+    try:
+        interval_min = float(os.environ.get("PANEL_SUB_REFRESH_INTERVAL_MIN", "0").strip() or "0")
+    except ValueError:
+        interval_min = 0
+    password = os.environ.get("VAULT_PASSWORD", "").strip()
+    if interval_min <= 0 or not password:
+        return
+    interval = max(300.0, interval_min * 60)
+    panel_audit(f"订阅后台刷新已启用，间隔 {int(interval // 60)} 分钟")
+    while True:
+        await asyncio.sleep(interval)
+        result = await _refresh_subscription_vaults_once(password, os.environ.get("CLASH_API_SECRET", "").strip() or None)
+        panel_audit(f"订阅后台刷新完成：成功 {result['refreshed']} 个，失败 {len(result['failed'])} 个", op="后台刷新")
+
+
 @asynccontextmanager
 async def _panel_lifespan(application: FastAPI):
     level = logging.DEBUG if PANEL_DEBUG else logging.INFO
@@ -448,10 +597,14 @@ async def _panel_lifespan(application: FastAPI):
     logging.getLogger("httpcore").setLevel(logging.WARNING)
     _clash_timeout = float(os.environ.get("PANEL_CLASH_TIMEOUT", "15"))
     application.state.http_client = httpx.AsyncClient(timeout=_clash_timeout)
+    application.state.sub_refresh_task = asyncio.create_task(_subscription_refresh_loop())
     panel_audit("面板服务已启动")
     try:
         yield
     finally:
+        task = getattr(application.state, "sub_refresh_task", None)
+        if task:
+            task.cancel()
         await application.state.http_client.aclose()
 
 
@@ -538,6 +691,21 @@ def login_required(request: Request) -> None:
         raise HTTPException(status_code=401, detail="未登录")
 
 
+def get_csrf_token(request: Request) -> str:
+    token = request.session.get(_CSRF_SESSION_KEY)
+    if not isinstance(token, str) or len(token) < 24:
+        token = secrets.token_urlsafe(32)
+        request.session[_CSRF_SESSION_KEY] = token
+    return token
+
+
+def verify_csrf(request: Request) -> None:
+    expected = request.session.get(_CSRF_SESSION_KEY)
+    provided = request.headers.get("X-CSRF-Token", "")
+    if not isinstance(expected, str) or not _safe_str_eq(provided, expected):
+        raise HTTPException(status_code=403, detail="CSRF 校验失败，请刷新页面后重试")
+
+
 import hashlib
 
 def get_subscription_token() -> str:
@@ -600,6 +768,7 @@ async def api_login(body: LoginBody, request: Request):
 
 @app.post("/api/logout")
 async def api_logout(request: Request):
+    verify_csrf(request)
     request.session.clear()
     panel_audit("已退出登录", request=request, op="退出登录")
     return {"ok": True}
@@ -625,7 +794,7 @@ async def api_health(request: Request):
 
 
 @app.get("/api/meta")
-async def api_meta():
+async def api_meta(request: Request):
     return {
         "login_required": True,
         "auth_configured": PANEL_AUTH_CONFIGURED,
@@ -633,6 +802,7 @@ async def api_meta():
         "audit_log_max": PANEL_AUDIT_LOG_MAX,
         "audit_log_path": str(AUDIT_LOG_FILE),
         "route_modes": ROUTE_MODES,
+        "csrf_token": get_csrf_token(request),
     }
 
 
@@ -724,6 +894,7 @@ async def api_selector_summary(request: Request):
         "now": str(sel.get("now") or ""),
         "all": filtered_nodes,
         "types": node_types,
+        "health": HEALTH_STORE.snapshot(),
     }
 
 
@@ -801,13 +972,14 @@ async def _clash_proxy_delay_ms(proxy_name: str, timeout_ms: int, test_url: str)
 async def api_proxy_delays(body: ProxyDelaysBody, request: Request):
     """批量测延迟；浏览器可一次请求测多个节点，避免暴露 Clash secret。"""
     login_required(request)
+    verify_csrf(request)
     names = [str(n).strip() for n in body.names if str(n).strip()]
     if not names:
         raise HTTPException(status_code=400, detail="names 不能为空")
     if len(names) > 64:
         raise HTTPException(status_code=400, detail="单次最多测 64 个节点")
     panel_audit(f"测速节点 {len(names)} 个", request=request, op="测速")
-    url = (body.test_url or "").strip() or DEFAULT_DELAY_TEST_URL
+    url = _validate_delay_test_url((body.test_url or "").strip() or DEFAULT_DELAY_TEST_URL)
     timeout_ms = body.timeout_ms if body.timeout_ms is not None else 10000
     sem = asyncio.Semaphore(5)
 
@@ -820,10 +992,12 @@ async def api_proxy_delays(body: ProxyDelaysBody, request: Request):
     pairs = await asyncio.gather(*[one(n) for n in names])
     results: dict = {}
     for name, delay_ms, err, tier in pairs:
+        health = HEALTH_STORE.record(name, delay_ms, err)
         results[name] = {
             "delay_ms": delay_ms,
             "tier": tier,
             "error": err,
+            "health": health,
         }
     return {"ok": True, "test_url": url, "results": results}
 
@@ -832,19 +1006,28 @@ async def api_proxy_delays(body: ProxyDelaysBody, request: Request):
 async def api_proxy_delay(body: ProxyDelayBody, request: Request):
     """单节点测速：供前端逐个请求，先完成先更新 UI。"""
     login_required(request)
+    verify_csrf(request)
     name = str(body.name).strip()
     if not name:
         raise HTTPException(status_code=400, detail="name 不能为空")
-    url = (body.test_url or "").strip() or DEFAULT_DELAY_TEST_URL
+    url = _validate_delay_test_url((body.test_url or "").strip() or DEFAULT_DELAY_TEST_URL)
     timeout_ms = body.timeout_ms if body.timeout_ms is not None else 10000
     delay_ms, err = await _clash_proxy_delay_ms(name, timeout_ms, url)
+    health = HEALTH_STORE.record(name, delay_ms, err)
     return {
         "ok": True,
         "name": name,
         "delay_ms": delay_ms,
         "tier": _latency_tier_ms(delay_ms),
         "error": err,
+        "health": health,
     }
+
+
+@app.get("/api/node-health")
+async def api_node_health(request: Request):
+    login_required(request)
+    return {"ok": True, "health": HEALTH_STORE.snapshot()}
 
 
 class VaultImportBody(BaseModel):
@@ -856,11 +1039,23 @@ class VaultImportBody(BaseModel):
     vault_name: str | None = Field(None, max_length=64)
 
 
+class VaultPreviewBody(BaseModel):
+    vault_password: str = Field(..., min_length=1, max_length=512)
+    urls_text: str = Field(..., min_length=1, max_length=1_000_000)
+    vault_name: str | None = Field(None, max_length=64)
+
+
 class VaultSubscriptionBody(BaseModel):
     vault_password: str = Field(..., min_length=1, max_length=512)
     subscription_url: str = Field(..., min_length=1, max_length=2048)
     clash_secret: str | None = Field(None, max_length=512)
     vault_name: str | None = Field(None, max_length=64)
+
+
+class VaultRefreshBody(BaseModel):
+    name: str = Field(..., min_length=1, max_length=64)
+    password: str = Field(..., min_length=1, max_length=512)
+    clash_secret: str | None = Field(None, max_length=512)
 
 
 class VaultCreateBody(BaseModel):
@@ -927,6 +1122,7 @@ async def api_vaults(request: Request):
 @app.post("/api/vaults/create")
 async def api_vaults_create(body: VaultCreateBody, request: Request):
     login_required(request)
+    verify_csrf(request)
     name = _vault_name_norm(body.name)
     idx = _read_vault_index()
     vaults = idx.get("vaults") or []
@@ -950,6 +1146,7 @@ async def api_vaults_create(body: VaultCreateBody, request: Request):
 @app.post("/api/vaults/toggle")
 async def api_vaults_toggle(body: VaultToggleBody, request: Request):
     login_required(request)
+    verify_csrf(request)
     name = _vault_name_norm(body.name)
     idx = _read_vault_index()
     vaults = idx.get("vaults") or []
@@ -969,6 +1166,7 @@ async def api_vaults_toggle(body: VaultToggleBody, request: Request):
 @app.post("/api/vaults/rename")
 async def api_vaults_rename(body: VaultRenameBody, request: Request):
     login_required(request)
+    verify_csrf(request)
     old_name = _vault_name_norm(body.old_name)
     new_name = _vault_name_norm(body.new_name)
     if old_name == new_name:
@@ -1011,6 +1209,7 @@ async def api_vaults_rename(body: VaultRenameBody, request: Request):
 @app.post("/api/vaults/delete")
 async def api_vaults_delete(body: VaultDeleteBody, request: Request):
     login_required(request)
+    verify_csrf(request)
     name = _vault_name_norm(body.name)
     idx = _read_vault_index()
     # 验证密码
@@ -1041,34 +1240,71 @@ async def api_vaults_delete(body: VaultDeleteBody, request: Request):
 @app.post("/api/vault/import")
 async def api_vault_import(body: VaultImportBody, request: Request):
     login_required(request)
+    verify_csrf(request)
     if not body.vault_password.strip():
         raise HTTPException(status_code=400, detail="vault_password 不能为空")
 
     urls = parse_urls_text(body.urls_text)
-    if not urls:
-        raise HTTPException(status_code=400, detail="未解析到任何有效节点行（空行与 # 注释已忽略）")
     vault_name = _vault_name_norm(body.vault_name or "default")
-    vault_path = _vault_path(vault_name)
-
-    try:
-        encrypt_vault_file(urls, body.vault_password.strip(), vault_path)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"写入加密库失败: {e}") from e
-
-    total = _rebuild_config_from_vaults(body.vault_password.strip(), body.clash_secret)
-    _update_vault_node_count(vault_name, len(urls))
+    unique_count, duplicate_count, total = _import_vault_urls(
+        vault_name,
+        body.vault_password.strip(),
+        urls,
+        source_kind="manual",
+        clash_secret=body.clash_secret,
+    )
     panel_audit(
-        f"导入到节点库 {vault_name}：{len(urls)} 条；已合并生成配置（合计 {total} 条）",
+        f"导入到节点库 {vault_name}：{unique_count} 条（去重 {duplicate_count} 条）；已合并生成配置（合计 {total} 条）",
         request=request,
         op="导入节点库",
     )
-    return {"ok": True, "node_count": len(urls), "total_count": total, "vault": str(vault_path), "config": str(CONFIG_FILE)}
+    return {
+        "ok": True,
+        "node_count": unique_count,
+        "duplicate_count": duplicate_count,
+        "total_count": total,
+        "vault": str(_vault_path(vault_name)),
+        "config": str(CONFIG_FILE),
+    }
+
+
+@app.post("/api/vault/preview")
+async def api_vault_preview(body: VaultPreviewBody, request: Request):
+    """Preview how a manual import would change the target vault."""
+    login_required(request)
+    verify_csrf(request)
+    vault_name = _vault_name_norm(body.vault_name or "default")
+    new_urls, duplicate_count = dedupe_urls(parse_urls_text(body.urls_text))
+    old_urls: list[str] = []
+    path = _vault_path(vault_name)
+    if path.is_file():
+        try:
+            old_urls = decrypt_vault_file(path, body.vault_password.strip())
+        except Exception:
+            return {"ok": False, "detail": "密码错误，无法预览该节点库"}
+    old_set = set(old_urls)
+    new_set = set(new_urls)
+    added = [u for u in new_urls if u not in old_set]
+    removed = [u for u in old_urls if u not in new_set]
+    unchanged = [u for u in new_urls if u in old_set]
+    return {
+        "ok": True,
+        "new_count": len(new_urls),
+        "old_count": len(old_urls),
+        "added_count": len(added),
+        "removed_count": len(removed),
+        "unchanged_count": len(unchanged),
+        "duplicate_count": duplicate_count,
+        "added_preview": added[:5],
+        "removed_preview": removed[:5],
+    }
 
 
 @app.post("/api/vault/reset")
 async def api_vault_reset(body: VaultResetBody, request: Request):
     """重建节点库：删除所有加密文件（需要管理员密码）。"""
     login_required(request)
+    verify_csrf(request)
     if not _safe_str_eq(body.admin_password.strip(), PANEL_PASSWORD):
         return {"ok": False, "detail": "管理员密码错误"}
     try:
@@ -1102,54 +1338,74 @@ async def api_vault_reset(body: VaultResetBody, request: Request):
 async def api_vault_import_subscription(body: VaultSubscriptionBody, request: Request):
     """通过订阅链接拉取并导入节点。"""
     login_required(request)
-    _validate_subscription_url(body.subscription_url)
+    verify_csrf(request)
+    subscription_url = _validate_subscription_url(body.subscription_url)
     if not body.vault_password.strip():
         raise HTTPException(status_code=400, detail="vault_password 不能为空")
 
-    try:
-        async with httpx.AsyncClient(timeout=_SUBSCRIPTION_TIMEOUT, follow_redirects=True) as client:
-            r = await client.get(
-                body.subscription_url.strip(),
-                headers={"User-Agent": "ProxyBridgePanel/1.0"},
-            )
-    except httpx.RequestError as e:
-        raise HTTPException(status_code=502, detail=f"拉取订阅失败: {e}") from e
-
-    if not r.is_success:
-        raise HTTPException(status_code=502, detail=f"订阅服务器返回 HTTP {r.status_code}")
-
-    content = r.content or b""
-    if len(content) > _SUBSCRIPTION_MAX_BYTES:
-        raise HTTPException(status_code=413, detail="订阅内容过大，请拆分或调小订阅范围")
-
+    content = await _fetch_subscription_content(subscription_url)
     text = content.decode("utf-8", errors="replace")
     decoded_text = _decode_subscription_payload(text)
 
     urls = parse_urls_text(decoded_text)
-    if not urls:
-        raise HTTPException(status_code=400, detail="订阅内容未解析到任何有效节点")
     vault_name = _vault_name_norm(body.vault_name or "default")
-    vault_path = _vault_path(vault_name)
-
-    # 写入 vault + 生成 config（逻辑与手工导入一致）
-    try:
-        encrypt_vault_file(urls, body.vault_password.strip(), vault_path)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"写入加密库失败: {e}") from e
-    total = _rebuild_config_from_vaults(body.vault_password.strip(), body.clash_secret)
-    _update_vault_node_count(vault_name, len(urls))
+    unique_count, duplicate_count, total = _import_vault_urls(
+        vault_name,
+        body.vault_password.strip(),
+        urls,
+        source_url=subscription_url,
+        source_kind="subscription",
+        clash_secret=body.clash_secret,
+    )
     panel_audit(
-        f"订阅导入到节点库 {vault_name}：{len(urls)} 条；已合并生成配置（合计 {total} 条）",
+        f"订阅导入到节点库 {vault_name}：{unique_count} 条（去重 {duplicate_count} 条）；已合并生成配置（合计 {total} 条）",
         request=request,
         op="订阅导入",
     )
-    return {"ok": True, "node_count": len(urls), "total_count": total}
+    return {"ok": True, "node_count": unique_count, "duplicate_count": duplicate_count, "total_count": total}
+
+
+@app.post("/api/vault/refresh")
+async def api_vault_refresh(body: VaultRefreshBody, request: Request):
+    """Using the stored subscription source, refresh a vault in place."""
+    login_required(request)
+    verify_csrf(request)
+    vault_name = _vault_name_norm(body.name)
+    idx = _read_vault_index()
+    record = next((v for v in (idx.get("vaults") or []) if isinstance(v, dict) and v.get("name") == vault_name), None)
+    if not isinstance(record, dict):
+        raise HTTPException(status_code=404, detail="节点库不存在")
+    source_url = (record.get("source_url") or "").strip()
+    source_kind = (record.get("source_kind") or "").strip()
+    if not source_url or source_kind != "subscription":
+        raise HTTPException(status_code=400, detail="该节点库没有可刷新订阅来源")
+    if not body.password.strip():
+        raise HTTPException(status_code=400, detail="password 不能为空")
+
+    content = await _fetch_subscription_content(source_url)
+    decoded_text = _decode_subscription_payload(content.decode("utf-8", errors="replace"))
+    urls = parse_urls_text(decoded_text)
+    unique_count, duplicate_count, total = _import_vault_urls(
+        vault_name,
+        body.password.strip(),
+        urls,
+        source_url=source_url,
+        source_kind="subscription",
+        clash_secret=body.clash_secret,
+    )
+    panel_audit(
+        f"刷新节点库 {vault_name}：{unique_count} 条（去重 {duplicate_count} 条）；已重新生成配置（合计 {total} 条）",
+        request=request,
+        op="刷新订阅",
+    )
+    return {"ok": True, "node_count": unique_count, "duplicate_count": duplicate_count, "total_count": total, "source_url": source_url}
 
 
 @app.post("/api/vault/verify")
 async def api_vault_verify(body: VaultExportBody, request: Request):
     """验证库密码是否正确。如果库文件不存在，则视为新库，验证通过。"""
     login_required(request)
+    verify_csrf(request)
     path = _vault_path(body.name)
     if not path.is_file():
         # 库文件不存在，说明是首次导入，任何密码都暂时接受（作为初始密码）
@@ -1165,6 +1421,7 @@ async def api_vault_verify(body: VaultExportBody, request: Request):
 async def api_vault_export(body: VaultExportBody, request: Request):
     """解密并导出节点库内容：用于“查看”或“编辑”。"""
     login_required(request)
+    verify_csrf(request)
     path = _vault_path(body.name)
     if not path.is_file():
         raise HTTPException(status_code=404, detail="节点库文件不存在")
@@ -1179,6 +1436,7 @@ async def api_vault_export(body: VaultExportBody, request: Request):
 @app.put("/api/selector/{group}")
 async def api_select_group(group: str, body: SelectBody, request: Request):
     login_required(request)
+    verify_csrf(request)
     if group != SELECTOR_TAG:
         raise HTTPException(status_code=400, detail="仅允许切换配置的 selector 分组")
     payload = {"name": body.name}
@@ -1203,6 +1461,7 @@ async def api_select_group(group: str, body: SelectBody, request: Request):
 @app.post("/api/rebuild")
 async def api_rebuild(body: RebuildBody, request: Request):
     login_required(request)
+    verify_csrf(request)
     panel_audit(f"手动重构配置 (模式: {body.route_mode})", request=request, op="重构配置")
     total = _rebuild_config_from_vaults(
         body.vault_password.strip(),
@@ -1249,6 +1508,7 @@ async def api_connections(request: Request):
 async def api_connections_close_all(request: Request):
     """强行中断内核中所有的活动代理连接。"""
     login_required(request)
+    verify_csrf(request)
     try:
         res = await clash_request("DELETE", "/connections")
         return {"ok": True, "status": res.status_code}
@@ -1260,6 +1520,7 @@ async def api_connections_close_all(request: Request):
 async def api_connection_close(conn_id: str, request: Request):
     """中断特定的活动代理连接。"""
     login_required(request)
+    verify_csrf(request)
     try:
         res = await clash_request("DELETE", f"/connections/{conn_id}")
         return {"ok": True, "status": res.status_code}

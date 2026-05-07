@@ -414,8 +414,33 @@ ROUTE_MODES = {
 }
 
 
+def _deep_merge(base: dict, override: dict) -> dict:
+    merged = dict(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _apply_config_template(config: dict) -> dict:
+    path_raw = os.environ.get("SINGBOX_TEMPLATE_PATH", "").strip()
+    if not path_raw:
+        return config
+    path = Path(path_raw)
+    try:
+        override = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as e:
+        raise ValueError(f"SINGBOX_TEMPLATE_PATH 无法读取或不是合法 JSON: {e}") from e
+    if not isinstance(override, dict):
+        raise ValueError("SINGBOX_TEMPLATE_PATH 必须是 JSON object")
+    return _deep_merge(config, override)
+
+
 def build_singbox_config(urls: list[str], route_mode: str = "bypass_cn") -> dict:
     """根据 URL 列表和路由模式构建完整 sing-box 配置 dict。"""
+    urls, _ = dedupe_urls(urls)
     if not urls:
         raise ValueError("节点列表为空")
 
@@ -512,7 +537,7 @@ def build_singbox_config(urls: list[str], route_mode: str = "bypass_cn") -> dict
     if clash is not None:
         config["experimental"] = clash
 
-    return config
+    return _apply_config_template(config)
 
 
 def strip_clash_embedded_web_ui(config: dict) -> bool:
@@ -601,7 +626,7 @@ def parse_urls_text(text: str) -> list[str]:
             continue
             
         # 智能正则匹配：提取包含在任意行文本混排中的节点分享链接（隔离文本噪音）
-        matches = re.findall(r"((?:vmess|vless|trojan|ss|shadowsocks|hysteria2|tuic)://[^\s#]+)", line)
+        matches = re.findall(r"((?:vmess|vless|trojan|ss|shadowsocks|hysteria2|tuic)://\S+)", line)
         if matches:
             for m in matches:
                 out.append(m)
@@ -612,8 +637,27 @@ def parse_urls_text(text: str) -> list[str]:
     return out
 
 
+def dedupe_urls(urls: list[str]) -> tuple[list[str], int]:
+    """Preserve order while removing duplicate share links."""
+    seen: set[str] = set()
+    unique: list[str] = []
+    dup_count = 0
+    for raw in urls:
+        u = (raw or "").strip()
+        if not u:
+            continue
+        if u in seen:
+            dup_count += 1
+            continue
+        seen.add(u)
+        unique.append(u)
+    return unique, dup_count
+
+
 def load_urls_file(path: Path) -> list[str]:
-    return parse_urls_text(path.read_text(encoding="utf-8"))
+    urls = parse_urls_text(path.read_text(encoding="utf-8"))
+    unique, _ = dedupe_urls(urls)
+    return unique
 
 
 def outbound_to_vmess_url(outbound: dict) -> str:
@@ -987,117 +1031,27 @@ def outbound_to_clash_proxy(outbound: dict) -> dict | None:
 
 
 def generate_clash_yaml(proxies: list[dict]) -> str:
-    lines = []
-    lines.append("port: 7890")
-    lines.append("socks-port: 7891")
-    lines.append("allow-lan: true")
-    lines.append("mode: rule")
-    lines.append("log-level: info")
-    lines.append("external-controller: '127.0.0.1:9090'")
-    lines.append("")
-    lines.append("proxies:")
-    
-    for p in proxies:
-        lines.append(f"  - name: {json.dumps(p['name'], ensure_ascii=False)}")
-        lines.append(f"    type: {p['type']}")
-        lines.append(f"    server: {p['server']}")
-        lines.append(f"    port: {p['port']}")
-        
-        if p['type'] == 'ss':
-            lines.append(f"    cipher: {p['cipher']}")
-            lines.append(f"    password: {json.dumps(p['password'], ensure_ascii=False)}")
-            
-        elif p['type'] == 'vmess':
-            lines.append(f"    uuid: {p['uuid']}")
-            lines.append(f"    alterId: {p['alterId']}")
-            lines.append(f"    cipher: {p['cipher']}")
-            lines.append(f"    tls: {str(p['tls']).lower()}")
-            if p.get('servername'):
-                lines.append(f"    servername: {p['servername']}")
-            if p.get('network'):
-                lines.append(f"    network: {p['network']}")
-                if p['network'] == 'ws':
-                    lines.append("    ws-opts:")
-                    lines.append(f"      path: {p['ws-opts']['path']}")
-                    if p['ws-opts'].get('headers'):
-                        lines.append("      headers:")
-                        for k, v in p['ws-opts']['headers'].items():
-                            if v:
-                                lines.append(f"        {k}: {v}")
-                elif p['network'] == 'grpc':
-                    lines.append("    grpc-opts:")
-                    lines.append(f"      grpc-service-name: {p['grpc-opts']['grpc-service-name']}")
-                    
-        elif p['type'] == 'vless':
-            lines.append(f"    uuid: {p['uuid']}")
-            lines.append(f"    tls: {str(p['tls']).lower()}")
-            if p.get('servername'):
-                lines.append(f"    servername: {p['servername']}")
-            if p.get('reality-opts'):
-                lines.append("    reality-opts:")
-                lines.append(f"      public-key: {p['reality-opts']['public-key']}")
-                lines.append(f"      short-id: {p['reality-opts']['short-id']}")
-            if p.get('network'):
-                lines.append(f"    network: {p['network']}")
-                if p['network'] == 'ws':
-                    lines.append("    ws-opts:")
-                    lines.append(f"      path: {p['ws-opts']['path']}")
-                    if p['ws-opts'].get('headers'):
-                        lines.append("      headers:")
-                        for k, v in p['ws-opts']['headers'].items():
-                            if v:
-                                lines.append(f"        {k}: {v}")
-                elif p['network'] == 'grpc':
-                    lines.append("    grpc-opts:")
-                    lines.append(f"      grpc-service-name: {p['grpc-opts']['grpc-service-name']}")
-                    
-        elif p['type'] == 'trojan':
-            lines.append(f"    password: {json.dumps(p['password'], ensure_ascii=False)}")
-            lines.append(f"    tls: {str(p['tls']).lower()}")
-            if p.get('sni'):
-                lines.append(f"    sni: {p['sni']}")
-            if p.get('network'):
-                lines.append(f"    network: {p['network']}")
-                if p['network'] == 'ws':
-                    lines.append("    ws-opts:")
-                    lines.append(f"      path: {p['ws-opts']['path']}")
-                    if p['ws-opts'].get('headers'):
-                        lines.append("      headers:")
-                        for k, v in p['ws-opts']['headers'].items():
-                            if v:
-                                lines.append(f"        {k}: {v}")
-                                
-        elif p['type'] == 'hysteria2':
-            lines.append(f"    password: {p['password']}")
-            if p.get('sni'):
-                lines.append(f"    sni: {p['sni']}")
-            if p.get('skip-cert-verify'):
-                lines.append(f"    skip-cert-verify: {str(p['skip-cert-verify']).lower()}")
-            if p.get('obfs'):
-                lines.append(f"    obfs: {p['obfs']}")
-                if p.get('obfs-password'):
-                    lines.append(f"    obfs-password: {p['obfs-password']}")
-                    
-        elif p['type'] == 'tuic':
-            lines.append(f"    uuid: {p['uuid']}")
-            lines.append(f"    password: {p['password']}")
-            if p.get('sni'):
-                lines.append(f"    sni: {p['sni']}")
-            if p.get('alpn'):
-                lines.append(f"    alpn: {json.dumps(p['alpn'])}")
-            if p.get('congestion-controller'):
-                lines.append(f"    congestion-controller: {p['congestion-controller']}")
-                
-    lines.append("")
-    lines.append("proxy-groups:")
-    lines.append("  - name: 代理选择")
-    lines.append("    type: select")
-    lines.append("    proxies:")
-    for p in proxies:
-        lines.append(f"      - {json.dumps(p['name'], ensure_ascii=False)}")
-        
-    lines.append("")
-    lines.append("rules:")
-    lines.append("  - GEOIP,CN,DIRECT")
-    lines.append("  - MATCH,代理选择")
-    return "\n".join(lines)
+    import yaml
+
+    group_name = _SELECTOR_TAG
+    config = {
+        "port": 7890,
+        "socks-port": 7891,
+        "allow-lan": True,
+        "mode": "rule",
+        "log-level": "info",
+        "external-controller": "127.0.0.1:9090",
+        "proxies": proxies,
+        "proxy-groups": [
+            {
+                "name": group_name,
+                "type": "select",
+                "proxies": [p.get("name", "") for p in proxies],
+            }
+        ],
+        "rules": [
+            "GEOIP,CN,DIRECT",
+            f"MATCH,{group_name}",
+        ],
+    }
+    return yaml.safe_dump(config, allow_unicode=True, sort_keys=False)

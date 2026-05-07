@@ -1,6 +1,6 @@
 services:
   proxy-bridge:
-    image: ghcr.io/sagernet/sing-box:latest
+    image: ${SINGBOX_IMAGE:-ghcr.io/sagernet/sing-box:latest}
     container_name: nethub-core
     restart: always
     volumes:
@@ -46,7 +46,10 @@ services:
       SINGBOX_CLASH_API: "1"
       PANEL_ADMIN_USER: ${PANEL_ADMIN_USER:-admin}
       PANEL_ADMIN_PASSWORD: ${PANEL_ADMIN_PASSWORD:-}
-      PANEL_SESSION_SECRET: ${PANEL_SESSION_SECRET:-nethub-panel-secret-change-me}
+      PANEL_SESSION_SECRET: ${PANEL_SESSION_SECRET:-}
+      VAULT_PASSWORD: ${VAULT_PASSWORD:-}
+      PANEL_SUB_REFRESH_INTERVAL_MIN: ${PANEL_SUB_REFRESH_INTERVAL_MIN:-0}
+      SINGBOX_TEMPLATE_PATH: ${SINGBOX_TEMPLATE_PATH:-}
     depends_on:
       proxy-bridge:
         condition: service_healthy
