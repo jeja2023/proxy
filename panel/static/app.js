@@ -1465,6 +1465,32 @@
     return api("/api/health");
   }
 
+  function formatUptime(seconds) {
+    const s = Math.max(0, Number(seconds) || 0);
+    const h = Math.floor(s / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    if (h > 0) return `${h}h ${m}m`;
+    return `${m}m`;
+  }
+
+  async function refreshGatewaySummary() {
+    const stat = $("stat-gateway");
+    const detail = $("stat-gateway-detail");
+    if (!stat || !detail) return;
+    try {
+      const s = await api("/api/gateway-summary");
+      stat.textContent = `${s.node_count || 0} 节点 · ${formatUptime(s.uptime_seconds)}`;
+      const refresh = s.background_refresh || {};
+      const refreshText = refresh.enabled
+        ? `后台刷新 ${refresh.interval_minutes}m，最近成功 ${refresh.last_refreshed || 0} 个`
+        : "后台刷新关闭";
+      detail.textContent = `库 ${s.enabled_vault_count}/${s.vault_count}，订阅 ${s.subscription_vault_count}，健康均分 ${s.health_avg_score ?? "未知"}，异常 ${s.health_degraded_count}；${refreshText}`;
+    } catch (e) {
+      stat.textContent = "总览不可用";
+      detail.textContent = e.message || "无法读取网关状态";
+    }
+  }
+
   async function refreshHealth() {
     const text = $("health-text");
     if (!text) return;
@@ -1480,6 +1506,7 @@
       text.textContent = "内核连接失败: " + (e.message || String(e));
       show(text, true);
     }
+    refreshGatewaySummary().catch(() => {});
   }
 
   // —— 自动切换逻辑 ——
@@ -1989,6 +2016,55 @@
         show(msg, true);
         msg.classList.add("err");
         msg.textContent = typeof e.data?.detail === "string" ? e.data.detail : e.message || "预览失败";
+      }
+    });
+  }
+
+  const btnBackupExport = $("btn-backup-export");
+  if (btnBackupExport) {
+    btnBackupExport.addEventListener("click", async () => {
+      try {
+        setGlobalLoading(true, "正在生成备份...");
+        const r = await fetch("/api/backup/export", {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { "X-CSRF-Token": csrfToken },
+        });
+        if (!r.ok) {
+          let msg = r.statusText || "导出备份失败";
+          try {
+            const data = await r.json();
+            msg = data.detail || msg;
+          } catch (_) {}
+          throw new Error(msg);
+        }
+        const blob = await r.blob();
+        const cd = r.headers.get("Content-Disposition") || "";
+        const m = cd.match(/filename=([^;]+)/i);
+        const filename = m ? m[1].replace(/"/g, "") : "nethub-backup.zip";
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+        const msg = $("vault-msg");
+        if (msg) {
+          show(msg, true);
+          msg.classList.remove("err");
+          msg.textContent = "备份已生成。";
+        }
+      } catch (e) {
+        const msg = $("vault-msg");
+        if (msg) {
+          show(msg, true);
+          msg.classList.add("err");
+          msg.textContent = e.message || "导出备份失败";
+        }
+      } finally {
+        setGlobalLoading(false);
       }
     });
   }

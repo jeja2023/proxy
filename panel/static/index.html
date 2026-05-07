@@ -75,6 +75,11 @@
             <div class="metric-label">活跃出口节点</div>
             <div id="stat-route-mode" style="margin-top: 1rem; font-size: 0.85rem; color: var(--muted); font-weight: 500;">分流模式: 正在读取...</div>
           </div>
+          <div class="card metric-card">
+            <div class="metric-value" id="stat-gateway">网关就绪</div>
+            <div class="metric-label">云端网关总览</div>
+            <div id="stat-gateway-detail" style="margin-top: 1rem; font-size: 0.85rem; color: var(--muted); font-weight: 500;">正在读取节点库与健康状态...</div>
+          </div>
         </div>
       </div>
 
@@ -119,6 +124,7 @@
             <h2>节点库管理</h2>
             <div class="vault-manage-head-right">
               <button type="button" class="btn-export-sub-trigger btn-secondary">导出订阅</button>
+              <button type="button" id="btn-backup-export" class="btn-secondary">导出备份</button>
               <button type="button" id="btn-vault-create">新建库</button>
               <button type="button" id="btn-vault-reset" class="btn-danger-light">清空全部</button>
             </div>

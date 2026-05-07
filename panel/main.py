@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hmac
+import io
 import ipaddress
 import json
 import logging
@@ -12,6 +13,8 @@ import os
 import secrets
 import socket
 import sys
+import time
+import zipfile
 from collections import deque
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -56,6 +59,14 @@ DEFAULT_DELAY_TEST_URL = os.environ.get(
     "https://www.gstatic.com/generate_204",
 ).strip()
 _CSRF_SESSION_KEY = "csrf_token"
+_STARTED_AT = time.time()
+_refresh_state: dict[str, object] = {
+    "enabled": False,
+    "interval_minutes": 0,
+    "last_run_at": "",
+    "last_refreshed": 0,
+    "last_failed": [],
+}
 
 CLASH_BASE = os.environ.get("CLASH_API_URL", "http://127.0.0.1:9020").rstrip("/")
 CLASH_SECRET = os.environ.get("CLASH_API_SECRET", "").strip()
@@ -576,12 +587,19 @@ async def _subscription_refresh_loop() -> None:
         interval_min = 0
     password = os.environ.get("VAULT_PASSWORD", "").strip()
     if interval_min <= 0 or not password:
+        _refresh_state.update({"enabled": False, "interval_minutes": 0})
         return
     interval = max(300.0, interval_min * 60)
+    _refresh_state.update({"enabled": True, "interval_minutes": int(interval // 60)})
     panel_audit(f"订阅后台刷新已启用，间隔 {int(interval // 60)} 分钟")
     while True:
         await asyncio.sleep(interval)
         result = await _refresh_subscription_vaults_once(password, os.environ.get("CLASH_API_SECRET", "").strip() or None)
+        _refresh_state.update({
+            "last_run_at": _now_iso(),
+            "last_refreshed": int(result["refreshed"]),
+            "last_failed": list(result["failed"]),
+        })
         panel_audit(f"订阅后台刷新完成：成功 {result['refreshed']} 个，失败 {len(result['failed'])} 个", op="后台刷新")
 
 
@@ -791,6 +809,35 @@ async def api_health(request: Request):
                 "detail": str(e),
             },
         )
+
+
+@app.get("/api/gateway-summary")
+async def api_gateway_summary(request: Request):
+    login_required(request)
+    vaults = _list_vaults()
+    health = HEALTH_STORE.snapshot()
+    scored = [h for h in health.values() if isinstance(h.get("score"), int)]
+    avg_score = int(sum(int(h["score"]) for h in scored) / len(scored)) if scored else None
+    degraded = sum(1 for h in scored if int(h["score"]) < 70)
+    config_mtime = ""
+    if CONFIG_FILE.is_file():
+        try:
+            config_mtime = datetime.fromtimestamp(CONFIG_FILE.stat().st_mtime, UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        except OSError:
+            config_mtime = ""
+    return {
+        "ok": True,
+        "uptime_seconds": int(time.time() - _STARTED_AT),
+        "config_exists": CONFIG_FILE.is_file(),
+        "config_updated_at": config_mtime,
+        "vault_count": len(vaults),
+        "enabled_vault_count": sum(1 for v in vaults if v.get("enabled")),
+        "subscription_vault_count": sum(1 for v in vaults if v.get("source_kind") == "subscription" and v.get("source_url")),
+        "node_count": sum(int(v.get("node_count") or 0) for v in vaults),
+        "health_avg_score": avg_score,
+        "health_degraded_count": degraded,
+        "background_refresh": dict(_refresh_state),
+    }
 
 
 @app.get("/api/meta")
@@ -1431,6 +1478,44 @@ async def api_vault_export(body: VaultExportBody, request: Request):
         return {"ok": True, "urls": urls}
     except Exception as e:
         return {"ok": False, "detail": f"解析失败（密码可能错误）: {e}"}
+
+
+@app.post("/api/backup/export")
+async def api_backup_export(request: Request):
+    """Export encrypted gateway state for off-host backup."""
+    login_required(request)
+    verify_csrf(request)
+    buf = io.BytesIO()
+    manifest = {
+        "created_at": _now_iso(),
+        "format": "nethub-backup-v1",
+        "contains": [],
+    }
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        if VAULTS_INDEX.is_file():
+            zf.write(VAULTS_INDEX, "vaults/index.json")
+            manifest["contains"].append("vaults/index.json")
+        if VAULTS_DIR.is_dir():
+            for p in VAULTS_DIR.glob("*.enc"):
+                zf.write(p, f"vaults/{p.name}")
+                manifest["contains"].append(f"vaults/{p.name}")
+        if CONFIG_FILE.is_file():
+            zf.write(CONFIG_FILE, "config.json")
+            manifest["contains"].append("config.json")
+        health_path = DATA_DIR / "node_health.json"
+        if health_path.is_file():
+            zf.write(health_path, "node_health.json")
+            manifest["contains"].append("node_health.json")
+        zf.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
+    buf.seek(0)
+    panel_audit("导出网关备份", request=request, op="导出备份")
+    from fastapi.responses import StreamingResponse
+    filename = f"nethub-backup-{datetime.now(UTC).strftime('%Y%m%d-%H%M%S')}.zip"
+    return StreamingResponse(
+        buf,
+        media_type="application/zip",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
 
 
 @app.put("/api/selector/{group}")
