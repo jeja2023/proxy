@@ -153,7 +153,7 @@ sudo chmod -R 775 data config.json || true
 
 # 4. 启动服务
 echo -e "${GREEN}>>> 正在拉取镜像并启动容器服务...${NC}"
-sudo $DOCKER_COMPOSE --profile panel up -d
+sudo $DOCKER_COMPOSE --profile panel up -d --build
 
 # 5. 状态检查与输出
 if [ $? -eq 0 ]; then
@@ -173,6 +173,7 @@ if [ $? -eq 0 ]; then
     echo -e "常用管理命令:"
     echo -e "  查看实时日志: sudo $DOCKER_COMPOSE logs -f"
     echo -e "  重启所有服务: sudo $DOCKER_COMPOSE --profile panel restart"
+    echo -e "  更新并重建:   sudo $DOCKER_COMPOSE --profile panel up -d --build"
     echo -e "  停止并卸载:   sudo $DOCKER_COMPOSE --profile panel down"
     echo -e "${GREEN}================================================${NC}"
 else
