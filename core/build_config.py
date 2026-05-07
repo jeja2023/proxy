@@ -497,6 +497,19 @@ def build_singbox_config(urls: list[str], route_mode: str = "bypass_cn") -> dict
     # 默认规则
     rules.append({"outbound": "direct" if route_mode == "direct" else _SELECTOR_TAG})
 
+    http_inbound: dict = {
+        "type": "http",
+        "tag": "http-in",
+        "listen": os.environ.get("SINGBOX_HTTP_LISTEN", "0.0.0.0").strip() or "0.0.0.0",
+        "listen_port": int(os.environ.get("SINGBOX_HTTP_PORT", "2080")),
+        "sniff": True,
+        "sniff_override_destination": True
+    }
+    _http_user = os.environ.get("SINGBOX_HTTP_USER", "").strip()
+    _http_pass = os.environ.get("SINGBOX_HTTP_PASS", "").strip()
+    if _http_user and _http_pass:
+        http_inbound["users"] = [{"username": _http_user, "password": _http_pass}]
+
     config: dict = {
         "log": {
             "level": os.environ.get("SINGBOX_LOG_LEVEL", "info").strip() or "info",
@@ -515,16 +528,7 @@ def build_singbox_config(urls: list[str], route_mode: str = "bypass_cn") -> dict
             ],
             "final": "dns-remote"
         },
-        "inbounds": [
-            {
-                "type": "http",
-                "tag": "http-in",
-                "listen": os.environ.get("SINGBOX_HTTP_LISTEN", "0.0.0.0").strip() or "0.0.0.0",
-                "listen_port": int(os.environ.get("SINGBOX_HTTP_PORT", "2080")),
-                "sniff": True,
-                "sniff_override_destination": True
-            }
-        ],
+        "inbounds": [http_inbound],
         "outbounds": outbounds,
         "route": {
             "rules": rules,
@@ -571,16 +575,20 @@ def sanitize_config_file_if_needed(path: Path) -> bool:
 
 def bootstrap_placeholder_config() -> dict:
     """无节点时占位：仅 HTTP 入站 + direct，便于先起 sing-box 与面板再导入。"""
+    http_inbound: dict = {
+        "type": "http",
+        "tag": "http-in",
+        "listen": os.environ.get("SINGBOX_HTTP_LISTEN", "0.0.0.0").strip() or "0.0.0.0",
+        "listen_port": int(os.environ.get("SINGBOX_HTTP_PORT", "2080")),
+    }
+    _http_user = os.environ.get("SINGBOX_HTTP_USER", "").strip()
+    _http_pass = os.environ.get("SINGBOX_HTTP_PASS", "").strip()
+    if _http_user and _http_pass:
+        http_inbound["users"] = [{"username": _http_user, "password": _http_pass}]
+
     cfg: dict = {
         "log": {"level": "info", "timestamp": True},
-        "inbounds": [
-            {
-                "type": "http",
-                "tag": "http-in",
-                "listen": os.environ.get("SINGBOX_HTTP_LISTEN", "0.0.0.0").strip() or "0.0.0.0",
-                "listen_port": int(os.environ.get("SINGBOX_HTTP_PORT", "2080")),
-            }
-        ],
+        "inbounds": [http_inbound],
         "outbounds": [
             {
                 "type": "selector",
