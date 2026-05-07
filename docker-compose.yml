@@ -6,7 +6,7 @@ services:
     volumes:
       - ./config.json:/etc/sing-box/config.json
     ports:
-      - "2080:2080"
+      - "${SINGBOX_HTTP_PORT:-2080}:${SINGBOX_HTTP_PORT:-2080}"
     command: run -c /etc/sing-box/config.json
     # 校验挂载的配置可被 sing-box 解析；启动宽限期内需能通过检查，面板才会启动
     healthcheck:
