@@ -81,7 +81,7 @@ python scripts/diagnose_server.py
 ## ⚠️ 安全提示
 
 1.  **强密码建议**：请务必在 `.env` 中设置复杂的 `PANEL_ADMIN_PASSWORD` 与 `CLASH_API_SECRET`。
-2.  **端口保护**：默认 HTTP 代理端口为 `2080`，管理端口为 `8080`。在公网环境运行时，请通过防火墙限制来源 IP。
+2.  **端口保护**：默认 HTTP 代理端口为 `5986`，管理面板端口为 `8080`（支持在 `.env` 中通过 `SINGBOX_HTTP_PORT` 与 `PANEL_PORT` 自定义端口）。在公网环境运行时，强烈建议使用一键部署或修改为其它随机高位端口以提升安全性。
 3.  **密钥安全**：`.env` 与 `config.json` 包含敏感信息，已默认被 Git 忽略，请勿手动上传至公共仓库。
 
 ---
