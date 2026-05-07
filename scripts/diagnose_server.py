@@ -64,7 +64,7 @@ def main() -> int:
         print("[失败] 在 config.json 中未找到 HTTP 入站。")
         return 1
 
-    public_port = env.get("SINGBOX_HTTP_PORT") or "2080"
+    public_port = env.get("SINGBOX_HTTP_PORT") or "5986"
     panel_port = env.get("PANEL_PORT") or "8080"
     listen = http_inbound.get("listen") or ""
     internal_port = str(http_inbound.get("listen_port") or "")
@@ -86,8 +86,8 @@ def main() -> int:
         print("[警告] HTTP 代理监听在特定地址，请确认其为服务器的公网/私网网卡。")
 
     compose = compose_path.read_text(encoding="utf-8", errors="replace") if compose_path.is_file() else ""
-    old_mapping = "${SINGBOX_HTTP_PORT:-2080}:${SINGBOX_HTTP_PORT:-2080}"
-    fixed_mapping = "${SINGBOX_HTTP_PORT:-2080}:2080"
+    old_mapping = "${SINGBOX_HTTP_PORT:-5986}:${SINGBOX_HTTP_PORT:-5986}"
+    fixed_mapping = "${SINGBOX_HTTP_PORT:-5986}:2080"
 
     if old_mapping in compose:
         print("[失败] docker-compose.yml 将公网端口映射为了相同的容器端口。")

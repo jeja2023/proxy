@@ -96,17 +96,17 @@ fi
 # 提示用户配置 HTTP 代理的公网端口
 PROXY_PORT=$(grep "^SINGBOX_HTTP_PORT=" .env | cut -d'=' -f2 | xargs)
 if [ -z "$PROXY_PORT" ]; then
-    echo -e "${YELLOW}请输入 HTTP 代理外网宿主机端口 (默认 2080，强烈建议改为高位随机端口如 34567 以增强安全性防扫描): ${NC}"
+    echo -e "${YELLOW}请输入 HTTP 代理外网宿主机端口 (默认 5986，强烈建议改为高位随机端口如 34567 以增强安全性防扫描): ${NC}"
     read -r INPUT_PORT
     if [ -z "$INPUT_PORT" ]; then
-        INPUT_PORT="2080"
+        INPUT_PORT="5986"
         echo -e "${YELLOW}未输入端口，已使用默认端口: ${INPUT_PORT}${NC}"
     else
         if [[ "$INPUT_PORT" =~ ^[0-9]+$ ]] && [ "$INPUT_PORT" -ge 1 ] && [ "$INPUT_PORT" -le 65535 ]; then
             echo -e "${GREEN}HTTP 代理外网端口已设置为: ${INPUT_PORT}${NC}"
         else
-            echo -e "${RED}输入不是合法的端口号 (1-65535)，将退回使用默认端口: 2080${NC}"
-            INPUT_PORT="2080"
+            echo -e "${RED}输入不是合法的端口号 (1-65535)，将退回使用默认端口: 5986${NC}"
+            INPUT_PORT="5986"
         fi
     fi
     update_env "SINGBOX_HTTP_PORT" "$INPUT_PORT"
@@ -210,9 +210,9 @@ if [ $? -eq 0 ]; then
     echo -e "管理员账号:   ${YELLOW}$(grep "^PANEL_ADMIN_USER=" .env | cut -d'=' -f2 | xargs || echo "admin")${NC}"
     echo -e "管理员密码:   ${YELLOW}$(grep "^PANEL_ADMIN_PASSWORD=" .env | cut -d'=' -f2 | xargs)${NC}"
     echo -e "------------------------------------------------"
-    PROXY_PORT=$(grep "^SINGBOX_HTTP_PORT=" .env | cut -d'=' -f2 | xargs || echo "2080")
+    PROXY_PORT=$(grep "^SINGBOX_HTTP_PORT=" .env | cut -d'=' -f2 | xargs || echo "5986")
     if [ -z "$PROXY_PORT" ]; then
-        PROXY_PORT="2080"
+        PROXY_PORT="5986"
     fi
     echo -e "HTTP 代理端口: ${YELLOW}${PROXY_PORT}${NC}"
     echo -e "测试命令: curl -x http://127.0.0.1:${PROXY_PORT} https://www.google.com -I"
