@@ -56,6 +56,28 @@ python scripts/diagnose_server.py
 
 直接在服务器上运行 `python run.py` 时，管理面板默认仅监听本机回环地址；如需公网访问面板，请显式使用 `python run.py --panel-host 0.0.0.0`，并在安全组/防火墙中放行面板端口 `8080` 与代理公网端口。
 
+### HTTPS 代理入口
+
+如果希望客户端到 NetHub 的代理连接也使用 TLS，可以启用 HTTPS Forward Proxy。准备证书后，将证书目录挂载到容器内 `/certs`，并在 `.env` 中配置：
+
+```env
+SINGBOX_HTTPS_PROXY_ENABLED=1
+SINGBOX_HTTPS_PROXY_PUBLIC_PORT=2443
+SINGBOX_TLS_CERT_DIR=./certs
+SINGBOX_TLS_CERT_PATH=/certs/fullchain.pem
+SINGBOX_TLS_KEY_PATH=/certs/privkey.pem
+SINGBOX_TLS_SERVER_NAME=proxy.example.com
+```
+
+更新配置后重新生成/导入节点并重建容器：
+
+```bash
+docker compose --profile panel up -d --force-recreate
+python scripts/diagnose_server.py
+```
+
+客户端需选择支持 HTTPS Proxy 的软件，代理地址填写 `https://proxy.example.com:2443`。Cloudflare 普通橙云/Origin Rules 仍不适合承载该 forward proxy 流量，建议 DNS only 直连服务器。
+
 ## 📁 目录结构
 
 *   `run.py`: **主启动入口**。负责全栈服务的初始化与运行。

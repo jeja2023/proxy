@@ -497,18 +497,16 @@ def build_singbox_config(urls: list[str], route_mode: str = "bypass_cn") -> dict
     # 默认规则
     rules.append({"outbound": "direct" if route_mode == "direct" else _SELECTOR_TAG})
 
-    http_inbound: dict = {
-        "type": "http",
-        "tag": "http-in",
-        "listen": os.environ.get("SINGBOX_HTTP_LISTEN", "0.0.0.0").strip() or "0.0.0.0",
-        "listen_port": int(os.environ.get("SINGBOX_HTTP_PORT", "2080")),
-        "sniff": True,
-        "sniff_override_destination": True
-    }
-    _http_user = os.environ.get("SINGBOX_HTTP_USER", "").strip()
-    _http_pass = os.environ.get("SINGBOX_HTTP_PASS", "").strip()
-    if _http_user and _http_pass:
-        http_inbound["users"] = [{"username": _http_user, "password": _http_pass}]
+    http_inbound = _build_http_proxy_inbound(
+        tag="http-in",
+        listen=os.environ.get("SINGBOX_HTTP_LISTEN", "0.0.0.0").strip() or "0.0.0.0",
+        port=int(os.environ.get("SINGBOX_HTTP_PORT", "2080")),
+        sniff=True,
+    )
+    inbounds = [http_inbound]
+    https_inbound = _build_https_proxy_inbound_if_enabled()
+    if https_inbound is not None:
+        inbounds.append(https_inbound)
 
     config: dict = {
         "log": {
@@ -528,7 +526,7 @@ def build_singbox_config(urls: list[str], route_mode: str = "bypass_cn") -> dict
             ],
             "final": "dns-remote"
         },
-        "inbounds": [http_inbound],
+        "inbounds": inbounds,
         "outbounds": outbounds,
         "route": {
             "rules": rules,
@@ -542,6 +540,63 @@ def build_singbox_config(urls: list[str], route_mode: str = "bypass_cn") -> dict
         config["experimental"] = clash
 
     return _apply_config_template(config)
+
+
+def _env_enabled(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _proxy_users() -> list[dict] | None:
+    user = os.environ.get("SINGBOX_HTTP_USER", "").strip()
+    password = os.environ.get("SINGBOX_HTTP_PASS", "").strip()
+    if not user or not password:
+        return None
+    return [{"username": user, "password": password}]
+
+
+def _build_http_proxy_inbound(*, tag: str, listen: str, port: int, sniff: bool = False) -> dict:
+    inbound: dict = {
+        "type": "http",
+        "tag": tag,
+        "listen": listen,
+        "listen_port": port,
+    }
+    if sniff:
+        inbound["sniff"] = True
+        inbound["sniff_override_destination"] = True
+    users = _proxy_users()
+    if users:
+        inbound["users"] = users
+    return inbound
+
+
+def _build_https_proxy_inbound_if_enabled() -> dict | None:
+    if not _env_enabled("SINGBOX_HTTPS_PROXY_ENABLED"):
+        return None
+
+    cert_path = os.environ.get("SINGBOX_TLS_CERT_PATH", "").strip()
+    key_path = os.environ.get("SINGBOX_TLS_KEY_PATH", "").strip()
+    if not cert_path or not key_path:
+        raise ValueError(
+            "SINGBOX_HTTPS_PROXY_ENABLED=1 requires SINGBOX_TLS_CERT_PATH and SINGBOX_TLS_KEY_PATH"
+        )
+
+    inbound = _build_http_proxy_inbound(
+        tag=os.environ.get("SINGBOX_HTTPS_PROXY_TAG", "https-in").strip() or "https-in",
+        listen=os.environ.get("SINGBOX_HTTPS_PROXY_LISTEN", "0.0.0.0").strip() or "0.0.0.0",
+        port=int(os.environ.get("SINGBOX_HTTPS_PROXY_PORT", "2443")),
+        sniff=True,
+    )
+    tls: dict = {
+        "enabled": True,
+        "certificate_path": cert_path,
+        "key_path": key_path,
+    }
+    server_name = os.environ.get("SINGBOX_TLS_SERVER_NAME", "").strip()
+    if server_name:
+        tls["server_name"] = server_name
+    inbound["tls"] = tls
+    return inbound
 
 
 def strip_clash_embedded_web_ui(config: dict) -> bool:
@@ -575,20 +630,19 @@ def sanitize_config_file_if_needed(path: Path) -> bool:
 
 def bootstrap_placeholder_config() -> dict:
     """无节点时占位：仅 HTTP 入站 + direct，便于先起 sing-box 与面板再导入。"""
-    http_inbound: dict = {
-        "type": "http",
-        "tag": "http-in",
-        "listen": os.environ.get("SINGBOX_HTTP_LISTEN", "0.0.0.0").strip() or "0.0.0.0",
-        "listen_port": int(os.environ.get("SINGBOX_HTTP_PORT", "2080")),
-    }
-    _http_user = os.environ.get("SINGBOX_HTTP_USER", "").strip()
-    _http_pass = os.environ.get("SINGBOX_HTTP_PASS", "").strip()
-    if _http_user and _http_pass:
-        http_inbound["users"] = [{"username": _http_user, "password": _http_pass}]
+    http_inbound = _build_http_proxy_inbound(
+        tag="http-in",
+        listen=os.environ.get("SINGBOX_HTTP_LISTEN", "0.0.0.0").strip() or "0.0.0.0",
+        port=int(os.environ.get("SINGBOX_HTTP_PORT", "2080")),
+    )
+    inbounds = [http_inbound]
+    https_inbound = _build_https_proxy_inbound_if_enabled()
+    if https_inbound is not None:
+        inbounds.append(https_inbound)
 
     cfg: dict = {
         "log": {"level": "info", "timestamp": True},
-        "inbounds": [http_inbound],
+        "inbounds": inbounds,
         "outbounds": [
             {
                 "type": "selector",

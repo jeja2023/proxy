@@ -5,13 +5,13 @@ services:
     restart: always
     volumes:
       - ./config.json:/etc/sing-box/config.json
+      - ${SINGBOX_TLS_CERT_DIR:-./certs}:/certs:ro
     ports:
-      # SINGBOX_HTTP_PORT 是宿主机的公网代理端口。自动生成的 sing-box
-      # 配置文件在容器内固定监听 2080 端口，因此容器侧端口应固定为 2080，
-      # 以避免宿主机与自定义端口不一致导致代理无法访问。
-      - "${SINGBOX_HTTP_PORT:-5986}:2080"
+      # 公网 HTTP 代理端口 -> 容器内 sing-box 运行的 HTTP 代理端口。
+      - "${SINGBOX_HTTP_PORT:-2080}:2080"
+      # 可选的公网 HTTPS 正向代理端口 -> 容器内 TLS 代理端口。
+      - "${SINGBOX_HTTPS_PROXY_PUBLIC_PORT:-2443}:2443"
     command: run -c /etc/sing-box/config.json
-    # 校验挂载的配置可被 sing-box 解析；启动宽限期内需能通过检查，面板才会启动
     healthcheck:
       test:
         - CMD
@@ -35,7 +35,6 @@ services:
     ports:
       - "${PANEL_PORT:-8080}:8080"
     volumes:
-      # 与 sing-box 共用宿主机上的 config.json；面板可写则导入节点后会更新，需重启 proxy-bridge 加载
       - ./config.json:/app/config.json
       - ./data:/app/data
     environment:
@@ -55,6 +54,11 @@ services:
       SINGBOX_TEMPLATE_PATH: ${SINGBOX_TEMPLATE_PATH:-}
       SINGBOX_HTTP_USER: ${SINGBOX_HTTP_USER:-}
       SINGBOX_HTTP_PASS: ${SINGBOX_HTTP_PASS:-}
+      SINGBOX_HTTPS_PROXY_ENABLED: ${SINGBOX_HTTPS_PROXY_ENABLED:-0}
+      SINGBOX_HTTPS_PROXY_PORT: 2443
+      SINGBOX_TLS_CERT_PATH: ${SINGBOX_TLS_CERT_PATH:-}
+      SINGBOX_TLS_KEY_PATH: ${SINGBOX_TLS_KEY_PATH:-}
+      SINGBOX_TLS_SERVER_NAME: ${SINGBOX_TLS_SERVER_NAME:-}
     depends_on:
       proxy-bridge:
         condition: service_healthy

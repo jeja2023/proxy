@@ -65,6 +65,53 @@ class BuildConfigTests(unittest.TestCase):
 
         self.assertEqual(cfg["log"]["level"], "debug")
 
+    def test_build_singbox_config_adds_https_proxy_inbound(self) -> None:
+        updates = {
+            "SINGBOX_HTTPS_PROXY_ENABLED": "1",
+            "SINGBOX_HTTPS_PROXY_PORT": "2443",
+            "SINGBOX_TLS_CERT_PATH": "/certs/fullchain.pem",
+            "SINGBOX_TLS_KEY_PATH": "/certs/privkey.pem",
+            "SINGBOX_TLS_SERVER_NAME": "proxy.example.com",
+        }
+        old = {key: os.environ.get(key) for key in updates}
+        os.environ.update(updates)
+        try:
+            cfg = build_singbox_config(["vless://00000000-0000-0000-0000-000000000000@example.com:443?type=tcp#one"])
+        finally:
+            for key, value in old.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
+        inbound = next(item for item in cfg["inbounds"] if item["tag"] == "https-in")
+        self.assertEqual(inbound["listen_port"], 2443)
+        self.assertTrue(inbound["tls"]["enabled"])
+        self.assertEqual(inbound["tls"]["certificate_path"], "/certs/fullchain.pem")
+        self.assertEqual(inbound["tls"]["key_path"], "/certs/privkey.pem")
+        self.assertEqual(inbound["tls"]["server_name"], "proxy.example.com")
+
+    def test_https_proxy_requires_certificate_paths(self) -> None:
+        old_enabled = os.environ.get("SINGBOX_HTTPS_PROXY_ENABLED")
+        old_cert = os.environ.get("SINGBOX_TLS_CERT_PATH")
+        old_key = os.environ.get("SINGBOX_TLS_KEY_PATH")
+        os.environ["SINGBOX_HTTPS_PROXY_ENABLED"] = "1"
+        os.environ.pop("SINGBOX_TLS_CERT_PATH", None)
+        os.environ.pop("SINGBOX_TLS_KEY_PATH", None)
+        try:
+            with self.assertRaises(ValueError):
+                build_singbox_config(["vless://00000000-0000-0000-0000-000000000000@example.com:443?type=tcp#one"])
+        finally:
+            for key, value in {
+                "SINGBOX_HTTPS_PROXY_ENABLED": old_enabled,
+                "SINGBOX_TLS_CERT_PATH": old_cert,
+                "SINGBOX_TLS_KEY_PATH": old_key,
+            }.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
 
 if __name__ == "__main__":
     unittest.main()
