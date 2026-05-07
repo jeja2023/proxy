@@ -43,6 +43,19 @@ chmod +x 一键部署.sh && ./一键部署.sh
 docker compose --profile panel up -d
 ```
 
+### 服务器代理端口说明
+
+Docker 部署时，`.env` 里的 `SINGBOX_HTTP_PORT` 表示公网/宿主机端口，容器内 sing-box 默认固定监听 `2080`。例如 `SINGBOX_HTTP_PORT=5986` 时，客户端应连接 `服务器IP:5986`，Compose 会转发到容器内 `2080`。
+
+如果修改过 `.env` 端口或升级了 Compose 配置，请执行：
+
+```bash
+docker compose --profile panel up -d --force-recreate
+python scripts/diagnose_server.py
+```
+
+直接在服务器上运行 `python run.py` 时，管理面板默认仅监听本机回环地址；如需公网访问面板，请显式使用 `python run.py --panel-host 0.0.0.0`，并在安全组/防火墙中放行面板端口 `8080` 与代理公网端口。
+
 ## 📁 目录结构
 
 *   `run.py`: **主启动入口**。负责全栈服务的初始化与运行。

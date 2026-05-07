@@ -6,7 +6,10 @@ services:
     volumes:
       - ./config.json:/etc/sing-box/config.json
     ports:
-      - "${SINGBOX_HTTP_PORT:-2080}:${SINGBOX_HTTP_PORT:-2080}"
+      # SINGBOX_HTTP_PORT 是宿主机的公网代理端口。自动生成的 sing-box
+      # 配置文件在容器内固定监听 2080 端口，因此容器侧端口应固定为 2080，
+      # 以避免宿主机与自定义端口不一致导致代理无法访问。
+      - "${SINGBOX_HTTP_PORT:-2080}:2080"
     command: run -c /etc/sing-box/config.json
     # 校验挂载的配置可被 sing-box 解析；启动宽限期内需能通过检查，面板才会启动
     healthcheck:
@@ -50,6 +53,8 @@ services:
       VAULT_PASSWORD: ${VAULT_PASSWORD:-}
       PANEL_SUB_REFRESH_INTERVAL_MIN: ${PANEL_SUB_REFRESH_INTERVAL_MIN:-0}
       SINGBOX_TEMPLATE_PATH: ${SINGBOX_TEMPLATE_PATH:-}
+      SINGBOX_HTTP_USER: ${SINGBOX_HTTP_USER:-}
+      SINGBOX_HTTP_PASS: ${SINGBOX_HTTP_PASS:-}
     depends_on:
       proxy-bridge:
         condition: service_healthy
