@@ -57,6 +57,10 @@ docker compose --profile panel up -d
 *   **手动生成配置**：`python scripts/generate_singbox.py`
 *   **验证代理状态**：`curl -x http://127.0.0.1:2080 https://www.google.com -I`
 *   **查看系统日志**：可通过 Web 面板实时查看，或直接查阅 `data/panel_audit.jsonl`。
+*   **Docker 容器维护与更新**：
+    *   **重构镜像并重新拉起服务（推荐日常更新）**：`sudo docker compose --profile panel up -d --build`
+    *   **无缓存全新编译镜像并强制重建容器**：`sudo docker compose --profile panel build --no-cache && sudo docker compose --profile panel up -d --force-recreate`
+    *   **优雅关闭并彻底释放容器与网络桥接**：`sudo docker compose --profile panel down`
 *   **生产依赖锁定**：容器构建默认使用 `requirements.lock`；本地开发仍可使用 `requirements.txt`。
 *   **配置模板覆盖**：设置 `SINGBOX_TEMPLATE_PATH=/path/to/template.json` 可对生成的 sing-box 配置做 JSON 深度覆盖。
 *   **订阅后台刷新**：设置 `VAULT_PASSWORD` 与 `PANEL_SUB_REFRESH_INTERVAL_MIN` 后，面板会按间隔刷新记录过来源的订阅库。
