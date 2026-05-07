@@ -10,6 +10,12 @@
   let autoSwitchTimer = null;
   let isSwitching = false;
   let currentMeta = null;
+  let currentSelectorData = null;
+  let trafficSSE = null;
+  let subToken = "";
+  let connsTimer = null;
+  const trafficHistory = { up: [], down: [] };
+  const MAX_TRAFFIC_POINTS = 30;
 
   function setGlobalLoading(on, text = "加载中...") {
     const el = $("global-loader");
@@ -112,8 +118,10 @@
   function setTab(name) {
     localStorage.setItem(TAB_KEY, name);
     const node = $("panel-node");
+    const proxies = $("panel-proxies");
     const imp = $("panel-import");
     const logs = $("panel-logs");
+    const conns = $("panel-conns");
     document.querySelectorAll(".nav-item").forEach((b) => {
       const on = b.dataset.tab === name;
       b.classList.toggle("active", on);
@@ -121,10 +129,160 @@
       else b.removeAttribute("aria-current");
     });
     show(node, name === "node");
+    show(proxies, name === "proxies");
     show(imp, name === "import");
     show(logs, name === "logs");
+    show(conns, name === "conns");
     if (name === "logs") loadPanelLogs();
-    if (name === "node") loadMain(currentMeta).catch(() => {});
+    if (name === "conns") {
+      loadPanelConns();
+      startConnsInterval();
+    } else {
+      stopConnsInterval();
+    }
+    if (name === "node" || name === "proxies") {
+      loadMain(currentMeta).catch(() => {});
+    }
+    if (name === "node") {
+      initTrafficSSE();
+    } else {
+      stopTrafficSSE();
+    }
+  }
+
+  function startConnsInterval() {
+    if (connsTimer) return;
+    connsTimer = setInterval(() => {
+      loadPanelConns(true);
+    }, 5000);
+  }
+
+  function stopConnsInterval() {
+    if (connsTimer) {
+      clearInterval(connsTimer);
+      connsTimer = null;
+    }
+  }
+
+  async function loadPanelConns(silent = false) {
+    const tbody = $("conns-tbody");
+    if (!tbody) return;
+    const searchVal = ($("conn-search") ? $("conn-search").value : "").trim().toLowerCase();
+    try {
+      if (!silent && !tbody.children.length) {
+        tbody.innerHTML = '<tr><td colspan="8" style="text-align: center; color: var(--muted); padding: 2rem;">正在拉取实时连接...</td></tr>';
+      }
+      const res = await api("/api/connections");
+      const list = res.connections || [];
+      const filtered = list.filter(c => {
+        if (!searchVal) return true;
+        const host = (c.metadata.host || "").toLowerCase();
+        const dstIp = (c.metadata.destinationIP || "").toLowerCase();
+        const srcIp = (c.metadata.sourceIP || "").toLowerCase();
+        return host.includes(searchVal) || dstIp.includes(searchVal) || srcIp.includes(searchVal);
+      });
+      const badge = $("conns-count-badge");
+      if (badge) badge.textContent = filtered.length;
+      tbody.innerHTML = "";
+      if (!filtered.length) {
+        tbody.innerHTML = `<tr><td colspan="8" style="text-align: center; color: var(--muted); padding: 2rem;">${searchVal ? "没有找到符合搜索条件的活动连接" : "当前暂无活跃代理连接"}</td></tr>`;
+        return;
+      }
+      filtered.forEach((c, idx) => {
+        const tr = document.createElement("tr");
+
+        // 序号列
+        const tdIdx = document.createElement("td");
+        tdIdx.textContent = idx + 1;
+        tdIdx.style.textAlign = "center";
+        tdIdx.style.color = "var(--muted)";
+        tr.appendChild(tdIdx);
+
+        const tdType = document.createElement("td");
+        const network = (c.metadata.network || "TCP").toUpperCase();
+        const type = c.metadata.type || "";
+        tdType.innerHTML = `<span class="badge" style="font-size: 0.75rem; padding: 2px 6px; border-radius: 4px; font-weight: bold; background: ${network === "UDP" ? "#eab308" : "#3b82f6"}; color: #fff;">${network}</span><div style="font-size: 0.75rem; color: var(--muted); margin-top: 2px;">${type}</div>`;
+        tr.appendChild(tdType);
+
+        const tdSrc = document.createElement("td");
+        tdSrc.style.fontFamily = "monospace";
+        tdSrc.style.fontSize = "0.85rem";
+        tdSrc.textContent = `${c.metadata.sourceIP}:${c.metadata.sourcePort}`;
+        tr.appendChild(tdSrc);
+
+        const tdDst = document.createElement("td");
+        tdDst.style.fontWeight = "500";
+        const host = c.metadata.host;
+        const destIP = c.metadata.destinationIP;
+        const port = c.metadata.destinationPort;
+        if (host) {
+          tdDst.innerHTML = `<div style="word-break: break-all;">${host}</div><div style="font-size: 0.75rem; color: var(--muted); font-family: monospace;">${destIP}:${port}</div>`;
+        } else {
+          tdDst.innerHTML = `<span style="font-family: monospace; font-size: 0.85rem;">${destIP}:${port}</span>`;
+        }
+        tr.appendChild(tdDst);
+
+        const tdRule = document.createElement("td");
+        const ruleName = c.rule || "Match";
+        const payload = c.rulePayload ? ` [${c.rulePayload}]` : "";
+        let ruleBg = "#4b5563";
+        if (ruleName.toLowerCase().includes("direct") || ruleName.toLowerCase() === "match") ruleBg = "#10b981";
+        else if (ruleName.toLowerCase().includes("reject") || ruleName.toLowerCase().includes("block")) ruleBg = "#ef4444";
+        else if (ruleName.toLowerCase() !== "match") ruleBg = "var(--primary)";
+        tdRule.innerHTML = `<span style="display: inline-block; font-size: 0.75rem; padding: 2px 6px; border-radius: 4px; color: #fff; font-weight: 500; background: ${ruleBg};">${ruleName}</span><div style="font-size: 0.75rem; color: var(--muted); margin-top: 2px; word-break: break-all;">${payload}</div>`;
+        tr.appendChild(tdRule);
+
+        const tdNode = document.createElement("td");
+        tdNode.style.fontWeight = "500";
+        const chain = c.chains || [];
+        const outNodeName = chain[chain.length - 1] || "direct";
+        tdNode.innerHTML = `<span style="color: ${outNodeName === "direct" ? "var(--muted)" : "var(--primary)"};">${outNodeName}</span>`;
+        tr.appendChild(tdNode);
+
+        const tdTraffic = document.createElement("td");
+        tdTraffic.style.fontFamily = "monospace";
+        tdTraffic.style.fontSize = "0.85rem";
+        tdTraffic.textContent = `${formatBytesSimple(c.upload)} ⬆ / ${formatBytesSimple(c.download)} ⬇`;
+        tr.appendChild(tdTraffic);
+
+        const tdOpt = document.createElement("td");
+        tdOpt.style.textAlign = "center";
+        const btnClose = document.createElement("button");
+        btnClose.type = "button";
+        btnClose.className = "btn-icon-del";
+        btnClose.title = "断开此连接";
+        btnClose.style.padding = "4px";
+        btnClose.style.background = "none";
+        btnClose.style.border = "none";
+        btnClose.style.cursor = "pointer";
+        btnClose.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="color: var(--danger);"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>';
+        btnClose.onclick = async () => {
+          try {
+            await api(`/api/connections/${c.id}`, { method: "DELETE" });
+            tr.remove();
+            const currBadge = $("conns-count-badge");
+            if (currBadge) currBadge.textContent = Math.max(0, parseInt(currBadge.textContent) - 1);
+          } catch (err) {
+            console.error("断开连接失败", err);
+          }
+        };
+        tdOpt.appendChild(btnClose);
+        tr.appendChild(tdOpt);
+        tbody.appendChild(tr);
+      });
+    } catch (e) {
+      if (!silent) {
+        tbody.innerHTML = `<tr><td colspan="8" style="text-align: center; color: var(--danger); padding: 2rem;">加载连接失败: ${e.message || String(e)}</td></tr>`;
+      }
+    }
+  }
+
+  function formatBytesSimple(bytes) {
+    if (bytes === 0) return "0 B";
+    const k = 1024;
+    const sizes = ["B", "KB", "MB", "GB"];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + " " + sizes[i];
   }
 
   async function loadPanelLogs() {
@@ -161,16 +319,21 @@
 
       const thead = document.createElement("thead");
       const thr = document.createElement("tr");
-      const headers = ["时间", "IP", "用户", "操作", "详情"];
+      const headers = ["序号", "时间", "IP", "用户", "操作", "详情"];
       for (const h of headers) {
         const th = document.createElement("th");
         th.textContent = h;
+        if (h === "序号") {
+          th.style.textAlign = "center";
+          th.style.width = "4.5rem";
+        }
         thr.appendChild(th);
       }
       thead.appendChild(thr);
       table.appendChild(thead);
 
       const tbody = document.createElement("tbody");
+      let idx = 1;
       for (const e of entries) {
         const tr = document.createElement("tr");
         const t = e.t || "";
@@ -178,6 +341,13 @@
         const user = e.user || "-";
         const op = opLabel(e.op);
         const msg = e.msg || "";
+
+        // 序号列
+        const tdIdx = document.createElement("td");
+        tdIdx.textContent = idx++;
+        tdIdx.style.textAlign = "center";
+        tdIdx.style.color = "var(--muted)";
+        tr.appendChild(tdIdx);
 
         for (const v of [t, ip, user, op, msg]) {
           const td = document.createElement("td");
@@ -387,18 +557,37 @@
   }
 
   function fillNodeCards(data) {
+    currentSelectorData = data;
     const all = data.all || [];
     const now = data.now || "";
+    
+    let filtered = all.slice();
+    const q = ($("node-search") ? $("node-search").value : "").trim().toLowerCase();
+    if (q) {
+      filtered = filtered.filter(n => n.toLowerCase().includes(q));
+    }
+    
+    const sort = $("node-sort") ? $("node-sort").value : "default";
+    const cache = getSpeedCache();
+    if (sort === "name") {
+      filtered.sort((a, b) => a.localeCompare(b));
+    } else if (sort === "latency") {
+      filtered.sort((a, b) => {
+        const da = cache[a] ? (parseInt(cache[a].delayText) || 9999) : 9999;
+        const db = cache[b] ? (parseInt(cache[b].delayText) || 9999) : 9999;
+        return da - db;
+      });
+    }
+
     currentNodeName = now;
-    lastNodeNames = all.slice();
+    lastNodeNames = filtered; 
     const wrap = $("node-cards");
     wrap.innerHTML = "";
     $("selector-tag").textContent = data.tag || selectorTag;
 
-    const cache = getSpeedCache();
     const nowTs = Date.now();
 
-    for (const name of all) {
+    for (const name of filtered) {
       const card = buildNodeCard(name, now);
       wrap.appendChild(card);
 
@@ -409,18 +598,158 @@
       }
     }
     show($("selector-section"), true);
+    $("stat-node").textContent = now || "未连接";
   }
 
   async function loadMeta() {
     const m = await api("/api/meta");
     selectorTag = m.selector_tag || selectorTag;
+    currentMeta = m;
+    
+    // 填充路由模式
+    const sel = $("route-mode-select");
+    if (sel && m.route_modes) {
+      sel.innerHTML = "";
+      for (const [k, v] of Object.entries(m.route_modes)) {
+        const opt = document.createElement("option");
+        opt.value = k;
+        opt.textContent = v;
+        if (k === "bypass_cn") opt.selected = true;
+        sel.appendChild(opt);
+      }
+      sel.onchange = handleRouteModeChange;
+
+      // 更新状态卡片的只读文本
+      const statRouteMode = $("stat-route-mode");
+      if (statRouteMode) {
+        const selectedText = sel.options[sel.selectedIndex]?.text || "绕过大陆";
+        statRouteMode.textContent = `分流模式: ${selectedText}`;
+      }
+    }
+    
     return m;
+  }
+
+  async function handleRouteModeChange(ev) {
+    const mode = ev.target.value;
+    const selectedText = ev.target.options[ev.target.selectedIndex].text;
+    const name = "default"; // 默认库
+    const pw = await verifyVaultPassword(name, "重构配置验证", `更改路由模式为“${selectedText}”需要验证密码：`);
+    if (!pw) {
+       // 恢复原状
+       loadMeta().catch(() => {});
+       return;
+    }
+    try {
+      await api("/api/rebuild", {
+        method: "POST",
+        body: JSON.stringify({ vault_password: pw, route_mode: mode }),
+        loading: "正在重新部署规则..."
+      });
+      // 更新状态卡片的只读文本
+      const statRouteMode = $("stat-route-mode");
+      if (statRouteMode) {
+        statRouteMode.textContent = `分流模式: ${selectedText}`;
+      }
+      showConfirmModal({ title: "重构成功", desc: "路由模式已更新，内核已重载。", confirmText: "知道了", hideCancel: true }, () => {});
+    } catch (e) {
+      // 恢复原状
+      loadMeta().catch(() => {});
+      showConfirmModal({ title: "重构失败", desc: e.message || "无法应用新模式", confirmText: "重试" }, () => {});
+    }
+  }
+
+  function initTrafficSSE() {
+    if (trafficSSE) return;
+    trafficSSE = new EventSource("/api/traffic");
+    trafficSSE.onmessage = (ev) => {
+      try {
+        const data = JSON.parse(ev.data);
+        updateTrafficMetrics(data);
+      } catch (e) {}
+    };
+    trafficSSE.onerror = () => {
+      stopTrafficSSE();
+    };
+  }
+
+  function stopTrafficSSE() {
+    if (trafficSSE) {
+      trafficSSE.close();
+      trafficSSE = null;
+    }
+  }
+
+  function formatBytes(bytes) {
+    if (bytes === 0) return "0.00 B/s";
+    const k = 1024;
+    const sizes = ["B/s", "KB/s", "MB/s", "GB/s"];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
+  }
+
+  function updateTrafficMetrics(data) {
+    const up = data.up || 0;
+    const down = data.down || 0;
+    $("stat-up").textContent = formatBytes(up);
+    $("stat-down").textContent = formatBytes(down);
+    
+    trafficHistory.up.push(up);
+    trafficHistory.down.push(down);
+    if (trafficHistory.up.length > MAX_TRAFFIC_POINTS) {
+      trafficHistory.up.shift();
+      trafficHistory.down.shift();
+    }
+    
+    drawSparkline("chart-up", trafficHistory.up, "#2563eb");
+    drawSparkline("chart-down", trafficHistory.down, "#16a34a");
+  }
+
+  function drawSparkline(canvasId, data, color) {
+    const canvas = $(canvasId);
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    const dpr = window.devicePixelRatio || 1;
+    const rect = canvas.getBoundingClientRect();
+    canvas.width = rect.width * dpr;
+    canvas.height = rect.height * dpr;
+    ctx.scale(dpr, dpr);
+
+    ctx.clearRect(0, 0, rect.width, rect.height);
+    if (data.length < 2) return;
+
+    const max = Math.max(...data, 1024);
+    const step = rect.width / (MAX_TRAFFIC_POINTS - 1);
+    
+    ctx.beginPath();
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2;
+    ctx.lineJoin = "round";
+    
+    data.forEach((val, i) => {
+      const x = i * step;
+      const y = rect.height - (val / max) * rect.height * 0.8 - 5;
+      if (i === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+    
+    // 填充渐变
+    ctx.lineTo((data.length - 1) * step, rect.height);
+    ctx.lineTo(0, rect.height);
+    ctx.closePath();
+    const grad = ctx.createLinearGradient(0, 0, 0, rect.height);
+    grad.addColorStop(0, color + "44");
+    grad.addColorStop(1, color + "00");
+    ctx.fillStyle = grad;
+    ctx.fill();
   }
 
   async function loadVaultStatus() {
     const el = $("vault-status");
     try {
       const s = await api("/api/vault/status");
+      subToken = s.sub_token || "";
       const total = typeof s.vault_count === "number" ? s.vault_count : (s.vaults || []).length;
       const enabled = typeof s.enabled_count === "number" ? s.enabled_count : total;
       el.textContent = s.has_vault ? `已存在节点库 ${total} 个（启用 ${enabled} 个）` : "尚未导入节点库";
@@ -1270,7 +1599,10 @@
               });
               currentImportVault = name;
               currentImportPassword = pw;
-              $("import-target-name").textContent = name;
+              const targetNameEl = $("import-target-name");
+              if (targetNameEl) targetNameEl.textContent = name;
+              const targetNameManualEl = $("import-target-name-manual");
+              if (targetNameManualEl) targetNameManualEl.textContent = name;
               showModal("modal-import-choice");
             } catch (e) {
               showConfirmModal({
@@ -1311,6 +1643,35 @@
     }
 
     $("btn-refresh-logs").addEventListener("click", () => loadPanelLogs());
+
+    const btnRefreshConns = $("btn-refresh-conns");
+    if (btnRefreshConns) btnRefreshConns.addEventListener("click", () => loadPanelConns(false));
+
+    const btnCloseAllConns = $("btn-close-all-conns");
+    if (btnCloseAllConns) {
+      btnCloseAllConns.addEventListener("click", () => {
+        showConfirmModal({
+          title: "断开全部连接",
+          desc: "确定要强行断开当前所有的活跃代理连接吗？这将导致正在进行的网络请求瞬间中断并重连。",
+          confirmText: "确定断开",
+          hideCancel: false
+        }, async () => {
+          try {
+            await api("/api/connections", { method: "DELETE" });
+            loadPanelConns(true);
+          } catch (e) {
+            console.error("断开所有连接失败", e);
+          }
+        });
+      });
+    }
+
+    const connSearch = $("conn-search");
+    if (connSearch) {
+      connSearch.addEventListener("input", () => {
+        loadPanelConns(true);
+      });
+    }
 
     $("btn-test-all").addEventListener("click", async () => {
       const btn = $("btn-test-all");
@@ -1380,69 +1741,78 @@
       });
     });
 
-    $("login-form").addEventListener("submit", async (ev) => {
+    const loginForm = $("login-form");
+    if (loginForm) {
+      loginForm.addEventListener("submit", async (ev) => {
+        ev.preventDefault();
+        const user = ($("login-username") && $("login-username").value) || "";
+        const pw = $("login-password").value;
+        const errEl = $("login-error");
+        show(errEl, false);
+        try {
+          await api("/api/login", {
+            method: "POST",
+            body: JSON.stringify({ username: user.trim(), password: pw }),
+            loading: "正在登录...",
+          });
+          if ($("login-username")) $("login-username").value = "";
+          if ($("login-password")) $("login-password").value = "";
+          const meta = await loadMeta();
+          await loadMain(meta);
+        } catch (e) {
+          show(errEl, true);
+          errEl.textContent = e.data?.detail || e.message || "登录失败";
+        }
+      });
+    }
+
+  const btnLogout = $("btn-logout");
+  if (btnLogout) {
+    btnLogout.addEventListener("click", async () => {
+      try {
+        await api("/api/logout", { method: "POST" });
+      } catch (_) {}
+      location.reload();
+    });
+  }
+
+  const vaultImportForm = $("vault-import-form");
+  if (vaultImportForm) {
+    vaultImportForm.addEventListener("submit", async (ev) => {
       ev.preventDefault();
-    const user = ($("login-username") && $("login-username").value) || "";
-    const pw = $("login-password").value;
-    const errEl = $("login-error");
-    show(errEl, false);
-    try {
-      await api("/api/login", {
-        method: "POST",
-        body: JSON.stringify({ username: user.trim(), password: pw }),
-        loading: "正在登录...",
-      });
-      if ($("login-username")) $("login-username").value = "";
-      if ($("login-password")) $("login-password").value = "";
-      const meta = await loadMeta();
-      await loadMain(meta);
-    } catch (e) {
-      show(errEl, true);
-      errEl.textContent = e.data?.detail || e.message || "登录失败";
-    }
-  });
-
-  $("btn-logout").addEventListener("click", async () => {
-    try {
-      await api("/api/logout", { method: "POST" });
-    } catch (_) {}
-    location.reload();
-  });
-
-  $("vault-import-form").addEventListener("submit", async (ev) => {
-    ev.preventDefault();
-    const msg = $("vault-msg");
-    show(msg, true);
-    msg.classList.remove("err");
-    msg.textContent = "正在保存…";
-    const vaultName = currentImportVault || getVaultTarget();
-    const pw = currentImportPassword;
-    if (!pw) {
+      const msg = $("vault-msg");
       show(msg, true);
-      msg.classList.add("err");
-      msg.textContent = "身份验证失效，请重新点击导入。";
-      return;
-    }
-    const body = {
-      vault_password: pw,
-      urls_text: $("vault-urls").value,
-      vault_name: vaultName,
-    };
-    try {
-      const r = await api("/api/vault/import", {
-        method: "POST",
-        body: JSON.stringify(body),
-        loading: "正在加密并导入节点...",
-      });
-      msg.textContent = `导入成功：写入 ${r.node_count} 条；合计 ${r.total_count} 条；运行配置已更新。`;
-      await loadVaultStatus();
-      hideModal("modal-import-manual");
-      if ($("vault-urls")) $("vault-urls").value = "";
-    } catch (e) {
-      msg.classList.add("err");
-      msg.textContent = typeof e.data?.detail === "string" ? e.data.detail : e.message || "导入失败";
-    }
-  });
+      msg.classList.remove("err");
+      msg.textContent = "正在保存…";
+      const vaultName = currentImportVault || getVaultTarget();
+      const pw = currentImportPassword;
+      if (!pw) {
+        show(msg, true);
+        msg.classList.add("err");
+        msg.textContent = "身份验证失效，请重新点击导入。";
+        return;
+      }
+      const body = {
+        vault_password: pw,
+        urls_text: $("vault-urls").value,
+        vault_name: vaultName,
+      };
+      try {
+        const r = await api("/api/vault/import", {
+          method: "POST",
+          body: JSON.stringify(body),
+          loading: "正在处理并重构...",
+        });
+        msg.textContent = `成功：写入 ${r.node_count} 条；合计 ${r.total_count} 条；配置已热重载。`;
+        await loadVaultStatus();
+        hideModal("modal-import-manual");
+        if ($("vault-urls")) $("vault-urls").value = "";
+      } catch (e) {
+        msg.classList.add("err");
+        msg.textContent = typeof e.data?.detail === "string" ? e.data.detail : e.message || "导入失败";
+      }
+    });
+  }
 
   async function importFromSubscription() {
     const urlEl = $("vault-subscription-url");
@@ -1733,6 +2103,77 @@
           msg.textContent = "文件解析失败: " + (e.message || String(e));
         }
       }
+    });
+  }
+
+  document.querySelectorAll(".btn-export-sub-trigger").forEach((btn) => {
+    btn.onclick = () => {
+       showModal("modal-export-sub");
+    };
+  });
+
+  const showExportMsg = (text, isErr) => {
+    const el = $("export-msg");
+    if (!el) return;
+    el.classList.remove("hidden");
+    el.classList.toggle("err", !!isErr);
+    el.textContent = text;
+    setTimeout(() => {
+      el.classList.add("hidden");
+    }, 3000);
+  };
+
+  const setupExportCopy = (btnId, apiPath) => {
+    const btn = $(btnId);
+    if (btn) {
+      btn.onclick = async () => {
+        let url = window.location.origin + apiPath;
+        if (subToken) {
+          url += "?token=" + subToken;
+        }
+        try {
+          await navigator.clipboard.writeText(url);
+          showExportMsg("订阅链接已复制到剪贴板！", false);
+        } catch (e) {
+          showExportMsg("复制失败，请手动选择复制：" + url, true);
+        }
+      };
+    }
+  };
+
+  const setupExportDl = (btnId, apiPath) => {
+    const btn = $(btnId);
+    if (btn) {
+      btn.onclick = () => {
+        let url = apiPath;
+        if (subToken) {
+          url += "?token=" + subToken;
+        }
+        window.open(url, "_blank");
+      };
+    }
+  };
+
+  setupExportDl("btn-export-clash-dl", "/api/export/clash");
+  setupExportCopy("btn-export-clash-copy", "/api/export/clash");
+  
+  setupExportDl("btn-export-v2ray-dl", "/api/export/v2ray");
+  setupExportCopy("btn-export-v2ray-copy", "/api/export/v2ray");
+  
+  setupExportDl("btn-export-singbox-dl", "/api/export/singbox");
+  setupExportCopy("btn-export-singbox-copy", "/api/export/singbox");
+
+  const nodeSearch = $("node-search");
+  if (nodeSearch) {
+    nodeSearch.addEventListener("input", () => {
+      if (currentSelectorData) fillNodeCards(currentSelectorData);
+    });
+  }
+
+  const nodeSort = $("node-sort");
+  if (nodeSort) {
+    nodeSort.addEventListener("change", () => {
+      if (currentSelectorData) fillNodeCards(currentSelectorData);
     });
   }
 

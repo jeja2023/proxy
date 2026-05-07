@@ -37,7 +37,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from core.env import load_repo_dotenv as _load_dotenv_fn
-from core.build_config import NodeBuildError, build_singbox_config, write_singbox_config, parse_urls_text
+from core.build_config import NodeBuildError, build_singbox_config, write_singbox_config, parse_urls_text, ROUTE_MODES
 from core.vault_store import decrypt_vault_file, encrypt_vault_file
 
 _load_dotenv_fn(REPO_ROOT)
@@ -217,7 +217,7 @@ def _annotate_url_with_vault(url: str, vault_name: str) -> str:
     return p._replace(fragment=new_frag).geturl()
 
 
-def _rebuild_config_from_vaults(vault_password: str, clash_secret: str | None = None) -> int:
+def _rebuild_config_from_vaults(vault_password: str, clash_secret: str | None = None, route_mode: str = "bypass_cn") -> int:
     """解密所有启用 vault，合并生成 config.json；返回合并后的节点数。"""
 
     names = _enabled_vault_names()
@@ -242,12 +242,15 @@ def _rebuild_config_from_vaults(vault_password: str, clash_secret: str | None = 
     if clash_secret and clash_secret.strip():
         os.environ["CLASH_API_SECRET"] = clash_secret.strip()
     try:
-        cfg = build_singbox_config(all_urls)
+        cfg = build_singbox_config(all_urls, route_mode=route_mode)
     except (NodeBuildError, ValueError) as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     finally:
         if clash_secret and clash_secret.strip():
-            _restore_env("CLASH_API_SECRET", old_secret)
+            if old_secret is not None:
+                os.environ["CLASH_API_SECRET"] = old_secret
+            else:
+                os.environ.pop("CLASH_API_SECRET", None)
 
     try:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -257,7 +260,6 @@ def _rebuild_config_from_vaults(vault_password: str, clash_secret: str | None = 
         
         # 尝试通过 Clash API 通知内核热重载
         import httpx
-        from urllib.parse import quote
         url = f"{CLASH_BASE}/configs"
         headers = {"Authorization": f"Bearer {os.environ.get('CLASH_API_SECRET', '').strip()}"}
         # {"force": True} 触发重载
@@ -536,9 +538,34 @@ def login_required(request: Request) -> None:
         raise HTTPException(status_code=401, detail="未登录")
 
 
+import hashlib
+
+def get_subscription_token() -> str:
+    """基于管理员密码与会话安全密钥派生出高度安全的订阅 Token（前 16 位），单向不可逆。"""
+    src = f"{PANEL_PASSWORD}_{SESSION_SECRET}"
+    return hashlib.sha256(src.encode("utf-8")).hexdigest()[:16]
+
+
+def verify_export_access(request: Request, token: str | None = None) -> None:
+    """双重安全验证：1. 优先允许已登录的网页 Session。2. 否则校验 query 参数中的加密订阅凭证。"""
+    if hasattr(request, "session") and request.session.get("panel_ok"):
+        return
+    expected = get_subscription_token()
+    if not expected:
+        raise HTTPException(status_code=503, detail="系统未初始化安全密钥")
+    if not token or not _safe_str_eq(token, expected):
+        raise HTTPException(status_code=401, detail="订阅密钥错误或凭证已过期")
+
+
 class LoginBody(BaseModel):
     username: str = Field(..., min_length=1, max_length=128)
     password: str = Field(..., min_length=1, max_length=512)
+
+
+class RebuildBody(BaseModel):
+    vault_password: str = Field(..., min_length=1, max_length=512)
+    route_mode: str = Field("bypass_cn", pattern="^(global|rule|bypass_cn|direct)$")
+    clash_secret: str | None = None
 
 
 @app.get("/api/live")
@@ -605,6 +632,7 @@ async def api_meta():
         "selector_tag": SELECTOR_TAG,
         "audit_log_max": PANEL_AUDIT_LOG_MAX,
         "audit_log_path": str(AUDIT_LOG_FILE),
+        "route_modes": ROUTE_MODES,
     }
 
 
@@ -675,6 +703,7 @@ async def api_selector_summary(request: Request):
 
     enabled_vaults = set(_enabled_vault_names())
     filtered_nodes = []
+    node_types = {}
     for node in all_nodes:
         if not isinstance(node, str):
             continue
@@ -684,11 +713,17 @@ async def api_selector_summary(request: Request):
                 filtered_nodes.append(node)
         else:
             filtered_nodes.append(node)
+            
+    for node in filtered_nodes:
+        proxy_info = proxies.get(node)
+        if isinstance(proxy_info, dict):
+            node_types[node] = proxy_info.get("type", "unknown")
 
     return {
         "tag": SELECTOR_TAG,
         "now": str(sel.get("now") or ""),
         "all": filtered_nodes,
+        "types": node_types,
     }
 
 
@@ -879,6 +914,7 @@ async def api_vault_status(request: Request):
         "vaults": vaults,
         "config_exists": CONFIG_FILE.is_file(),
         "data_dir": str(DATA_DIR),
+        "sub_token": get_subscription_token(),
     }
 
 
@@ -1162,6 +1198,147 @@ async def api_select_group(group: str, body: SelectBody, request: Request):
             )
             return {"ok": True, "group": group, "name": body.name}
     raise HTTPException(status_code=502, detail="Clash API 不支持 PUT /proxies")
+
+
+@app.post("/api/rebuild")
+async def api_rebuild(body: RebuildBody, request: Request):
+    login_required(request)
+    panel_audit(f"手动重构配置 (模式: {body.route_mode})", request=request, op="重构配置")
+    total = _rebuild_config_from_vaults(
+        body.vault_password.strip(),
+        clash_secret=body.clash_secret,
+        route_mode=body.route_mode
+    )
+    return {"ok": True, "total_count": total, "route_mode": body.route_mode}
+
+
+@app.get("/api/traffic")
+async def api_traffic(request: Request):
+    """通过 SSE 代理内核流量数据。"""
+    login_required(request)
+
+    async def event_generator():
+        url = f"{CLASH_BASE}/traffic"
+        headers = clash_headers()
+        try:
+            async with app.state.http_client.stream("GET", url, headers=headers, timeout=None) as r:
+                async for line in r.aiter_lines():
+                    if not line:
+                        continue
+                    yield f"data: {line}\n\n"
+        except Exception as e:
+            logger.error("流量代理异常: %s", e)
+            yield f"data: {json.dumps({'up': 0, 'down': 0})}\n\n"
+
+    from fastapi.responses import StreamingResponse
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+@app.get("/api/connections")
+async def api_connections(request: Request):
+    """获取内核当前的所有活跃代理连接，用于实时网络追踪。"""
+    login_required(request)
+    try:
+        res = await clash_request("GET", "/connections")
+        return res.json()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"获取连接失败: {e}")
+
+
+@app.delete("/api/connections")
+async def api_connections_close_all(request: Request):
+    """强行中断内核中所有的活动代理连接。"""
+    login_required(request)
+    try:
+        res = await clash_request("DELETE", "/connections")
+        return {"ok": True, "status": res.status_code}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"中断所有连接失败: {e}")
+
+
+@app.delete("/api/connections/{conn_id}")
+async def api_connection_close(conn_id: str, request: Request):
+    """中断特定的活动代理连接。"""
+    login_required(request)
+    try:
+        res = await clash_request("DELETE", f"/connections/{conn_id}")
+        return {"ok": True, "status": res.status_code}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"关闭该代理连接失败: {e}")
+
+
+@app.get("/api/export/clash")
+async def api_export_clash(request: Request, token: str | None = None):
+    """导出当前运行的节点为 Clash YAML 订阅格式"""
+    verify_export_access(request, token)
+    if not CONFIG_FILE.is_file():
+        raise HTTPException(status_code=404, detail="配置文件不存在")
+    try:
+        data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"解析配置文件失败: {e}")
+        
+    outbounds = data.get("outbounds", [])
+    clash_proxies = []
+    from core.build_config import outbound_to_clash_proxy, generate_clash_yaml
+    for o in outbounds:
+        if o.get("type") in ("vmess", "vless", "trojan", "shadowsocks", "hysteria2", "tuic"):
+            p = outbound_to_clash_proxy(o)
+            if p:
+                clash_proxies.append(p)
+                
+    yaml_content = generate_clash_yaml(clash_proxies)
+    from fastapi.responses import PlainTextResponse
+    return PlainTextResponse(
+        yaml_content,
+        headers={
+            "Content-Disposition": "attachment; filename=nethub_clash.yaml"
+        }
+    )
+
+
+@app.get("/api/export/v2ray")
+async def api_export_v2ray(request: Request, token: str | None = None):
+    """导出当前运行的节点为 V2ray 通用 Base64 订阅"""
+    verify_export_access(request, token)
+    if not CONFIG_FILE.is_file():
+        raise HTTPException(status_code=404, detail="配置文件不存在")
+    try:
+        data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"解析配置文件失败: {e}")
+        
+    outbounds = data.get("outbounds", [])
+    urls = []
+    from core.build_config import outbound_to_share_url
+    for o in outbounds:
+        if o.get("type") in ("vmess", "vless", "trojan", "shadowsocks", "hysteria2", "tuic"):
+            url = outbound_to_share_url(o)
+            if url:
+                urls.append(url)
+                
+    payload = "\n".join(urls)
+    b64_payload = base64.b64encode(payload.encode("utf-8")).decode("utf-8")
+    from fastapi.responses import PlainTextResponse
+    return PlainTextResponse(
+        b64_payload,
+        headers={
+            "Content-Disposition": "attachment; filename=nethub_v2ray.txt"
+        }
+    )
+
+
+@app.get("/api/export/singbox")
+async def api_export_singbox(request: Request, token: str | None = None):
+    """导出当前运行的 sing-box 配置 JSON"""
+    verify_export_access(request, token)
+    if not CONFIG_FILE.is_file():
+        raise HTTPException(status_code=404, detail="配置文件不存在")
+    return FileResponse(
+        CONFIG_FILE,
+        media_type="application/json",
+        filename="nethub_config.json"
+    )
 
 
 @app.get("/login", include_in_schema=False)
