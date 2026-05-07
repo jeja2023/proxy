@@ -167,8 +167,12 @@ if [ $? -eq 0 ]; then
     echo -e "管理员账号:   ${YELLOW}$(grep "^PANEL_ADMIN_USER=" .env | cut -d'=' -f2 | xargs || echo "admin")${NC}"
     echo -e "管理员密码:   ${YELLOW}$(grep "^PANEL_ADMIN_PASSWORD=" .env | cut -d'=' -f2 | xargs)${NC}"
     echo -e "------------------------------------------------"
-    echo -e "HTTP 代理端口: ${YELLOW}2080${NC}"
-    echo -e "测试命令: curl -x http://127.0.0.1:2080 https://www.google.com -I"
+    PROXY_PORT=$(grep "^SINGBOX_HTTP_PORT=" .env | cut -d'=' -f2 | xargs || echo "2080")
+    if [ -z "$PROXY_PORT" ]; then
+        PROXY_PORT="2080"
+    fi
+    echo -e "HTTP 代理端口: ${YELLOW}${PROXY_PORT}${NC}"
+    echo -e "测试命令: curl -x http://127.0.0.1:${PROXY_PORT} https://www.google.com -I"
     echo -e "------------------------------------------------"
     echo -e "常用管理命令:"
     echo -e "  查看实时日志: sudo $DOCKER_COMPOSE logs -f"
