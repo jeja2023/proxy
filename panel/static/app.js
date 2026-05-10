@@ -11,10 +11,30 @@
   let isSwitching = false;
   let currentMeta = null;
   let currentSelectorData = null;
+  let qualityProbeCatalog = [
+    { id: "basic", name: "基础连通性" },
+    { id: "panel-auth", name: "面板鉴权 / CSRF" },
+    { id: "clash-auth", name: "Clash API Auth" },
+    { id: "proxy-auth", name: "HTTP 代理鉴权" },
+    { id: "site-google", name: "Google 可用性" },
+    { id: "site-youtube", name: "YouTube 可用性" },
+    { id: "site-netflix", name: "Netflix 解锁" },
+    { id: "site-github", name: "GitHub 可用性" },
+    { id: "site-openai", name: "OpenAI 解锁" },
+    { id: "site-cloudflare", name: "Cloudflare 可用性" },
+    { id: "site-wikipedia", name: "Wikipedia 可用性" },
+    { id: "site-microsoft", name: "Microsoft 可用性" },
+    { id: "openai", name: "OpenAI" },
+    { id: "anthropic", name: "Anthropic" },
+    { id: "gemini", name: "Gemini" },
+  ];
+  let qualityProbeResults = new Map();
+  let qualityReportMeta = null;
   let trafficSSE = null;
   let subToken = "";
   let csrfToken = "";
   let connsTimer = null;
+  let openModalCount = 0;
   const trafficHistory = { up: [], down: [] };
   const MAX_TRAFFIC_POINTS = 30;
 
@@ -75,12 +95,38 @@
 
   window.hideModal = (id) => {
     const el = $(id);
-    if (el) el.classList.add("hidden");
+    if (!el || el.classList.contains("hidden")) return;
+    el.classList.add("hidden");
+    openModalCount = Math.max(0, openModalCount - 1);
+    if (openModalCount === 0) document.body.classList.remove("modal-open");
   };
   window.showModal = (id) => {
     const el = $(id);
-    if (el) el.classList.remove("hidden");
+    if (!el || !el.classList.contains("hidden")) return;
+    el.classList.remove("hidden");
+    openModalCount += 1;
+    document.body.classList.add("modal-open");
   };
+
+  function preventModalScrollLeak() {
+    document.querySelectorAll(".modal-overlay").forEach((overlay) => {
+      if (overlay.dataset.scrollLockBound) return;
+      overlay.dataset.scrollLockBound = "true";
+      overlay.addEventListener("wheel", (ev) => {
+        const scrollBox = ev.target.closest(".modal-body");
+        if (!scrollBox || scrollBox.scrollHeight <= scrollBox.clientHeight) {
+          ev.preventDefault();
+          return;
+        }
+        const atTop = scrollBox.scrollTop <= 0;
+        const atBottom = scrollBox.scrollTop + scrollBox.clientHeight >= scrollBox.scrollHeight - 1;
+        if ((ev.deltaY < 0 && atTop) || (ev.deltaY > 0 && atBottom)) ev.preventDefault();
+      }, { passive: false });
+      overlay.addEventListener("touchmove", (ev) => {
+        if (!ev.target.closest(".modal-body")) ev.preventDefault();
+      }, { passive: false });
+    });
+  }
 
   async function api(path, opts = {}) {
     const showLoading = opts.loading;
@@ -141,6 +187,18 @@
     return el;
   }
 
+  function setRuntimeMetric(id, value, detail, state = "") {
+    const valueEl = $(id);
+    const detailEl = $(`${id}-detail`);
+    if (valueEl) {
+      valueEl.textContent = value;
+      valueEl.classList.toggle("is-ok", state === "ok");
+      valueEl.classList.toggle("is-warn", state === "warn");
+      valueEl.classList.toggle("is-bad", state === "bad");
+    }
+    if (detailEl) detailEl.textContent = detail || "";
+  }
+
   const TAB_KEY = "current_panel_tab";
 
   function setTab(name) {
@@ -173,6 +231,7 @@
     }
     if (name === "node") {
       initTrafficSSE();
+      refreshHealth().catch(() => {});
     } else {
       stopTrafficSSE();
     }
@@ -210,8 +269,6 @@
         const srcIp = (metadata.sourceIP || "").toLowerCase();
         return host.includes(searchVal) || dstIp.includes(searchVal) || srcIp.includes(searchVal);
       });
-      const badge = $("conns-count-badge");
-      if (badge) badge.textContent = filtered.length;
       tbody.replaceChildren();
       if (!filtered.length) {
         setTableMessage(tbody, 8, searchVal ? "没有找到符合搜索条件的活动连接" : "当前暂无活跃代理连接");
@@ -317,8 +374,6 @@
           try {
             await api(`/api/connections/${c.id}`, { method: "DELETE" });
             tr.remove();
-            const currBadge = $("conns-count-badge");
-            if (currBadge) currBadge.textContent = Math.max(0, parseInt(currBadge.textContent) - 1);
           } catch (err) {
             console.error("断开连接失败", err);
           }
@@ -458,7 +513,7 @@
     el.className = health.score >= 70 ? "node-m-health" : health.score >= 45 ? "node-m-health is-warn" : "node-m-health is-bad";
   }
 
-  function buildNodeCard(name, nowName) {
+  function buildNodeCard(name, nowName, nodeKind) {
     const art = document.createElement("article");
     art.className = "node-card" + (name === nowName ? " node-card--current" : "");
     art.dataset.name = name;
@@ -480,12 +535,34 @@
     h3.className = "node-card-title";
     h3.textContent = name;
     head.appendChild(h3);
+
+    const headMeta = document.createElement("div");
+    headMeta.className = "node-card-head-meta";
+
+    const kind = nodeKind || { kind: "other", label: "其它", reason: "" };
+    const kindTag = document.createElement("span");
+    kindTag.className = `node-kind-tag is-${kind.kind || "other"}`;
+    kindTag.textContent = kind.label || "其它";
+    kindTag.title = kind.reason || "节点来源类型";
+
+    const protoTag = document.createElement("span");
+    protoTag.className = "node-protocol-tag";
+    protoTag.textContent = kind.protocol_label || "未知";
+    protoTag.title = `协议类型：${kind.protocol || kind.protocol_label || "未知"}`;
+    headMeta.appendChild(protoTag);
+
+    const ddHealth = document.createElement("span");
+    ddHealth.className = "node-m-health is-warn";
+    ddHealth.textContent = "未知";
+    headMeta.appendChild(ddHealth);
+
     if (name === nowName) {
       const badge = document.createElement("span");
       badge.className = "node-card-badge";
       badge.textContent = "当前";
-      head.appendChild(badge);
+      headMeta.appendChild(badge);
     }
+    head.appendChild(headMeta);
     art.appendChild(head);
 
     const metrics = document.createElement("div");
@@ -525,20 +602,28 @@
     row.appendChild(itemTier);
     metrics.appendChild(row);
 
-    const rowHealth = document.createElement("div");
-    rowHealth.className = "node-m-row";
-    const itemHealth = document.createElement("span");
-    itemHealth.className = "node-m-item";
-    const labHealth = document.createElement("span");
-    labHealth.className = "node-m-lab";
-    labHealth.textContent = "健康";
-    const ddHealth = document.createElement("span");
-    ddHealth.className = "node-m-health is-warn";
-    ddHealth.textContent = "未知";
-    itemHealth.appendChild(labHealth);
-    itemHealth.appendChild(ddHealth);
-    rowHealth.appendChild(itemHealth);
-    metrics.appendChild(rowHealth);
+    const detailItems = [
+      ["地区", kind.region_label || kind.region, "region"],
+      ["倍率", kind.multiplier, "multiplier"],
+      ["链路", kind.link_type, "link"],
+    ].filter((item) => item[1]);
+    for (const [label, value, cls] of detailItems) {
+      const chip = document.createElement("span");
+      chip.className = `node-meta-chip is-${cls}`;
+      chip.title = `${label}：${value}`;
+      const chipLabel = document.createElement("span");
+      chipLabel.className = "node-meta-chip-label";
+      chipLabel.textContent = label;
+      const chipValue = document.createElement("span");
+      chipValue.className = "node-meta-chip-value";
+      chipValue.textContent = value;
+      chip.appendChild(chipLabel);
+      chip.appendChild(chipValue);
+      row.appendChild(chip);
+      if (cls === "region") row.appendChild(kindTag);
+    }
+    if (!detailItems.some((item) => item[2] === "region")) row.appendChild(kindTag);
+
     art.appendChild(metrics);
 
     return art;
@@ -619,6 +704,384 @@
     }
   }
 
+  function qualityStatusClass(status) {
+    if (status === "pass") return "quality-status-pass";
+    if (status === "warning") return "quality-status-warning";
+    if (status === "challenge") return "quality-status-challenge";
+    if (status === "pending" || status === "running") return "quality-status-pending";
+    return "quality-status-fail";
+  }
+
+  function blankQualityReport() {
+    return {
+      name: currentNodeName || "未选择节点",
+      score: "--",
+      grade: "--",
+      counts: { pass: 0, warning: 0, fail: 0, challenge: 0 },
+      exit_ip: "未知",
+      exit_region: "未知",
+      base_latency_ms: null,
+      checked_at: "尚未检测",
+      items: qualityProbeCatalog.map((item) => ({
+        id: item.id,
+        name: item.name,
+        status: "pending",
+        label: "待检测",
+        http_status: null,
+        elapsed_ms: null,
+        detail: "等待检测",
+      })),
+    };
+  }
+
+  function mergeQualityReport(report) {
+    if (Array.isArray(report?.catalog) && report.catalog.length) {
+      qualityProbeCatalog = report.catalog;
+    }
+    if (report?.report) report = report.report;
+    if (!report) return;
+    qualityReportMeta = {
+      score: report.score,
+      grade: report.grade,
+      counts: report.counts,
+      exit_ip: report.exit_ip,
+      exit_region: report.exit_region,
+      base_latency_ms: report.base_latency_ms,
+      checked_at: report.checked_at,
+    };
+    for (const item of report.items || []) {
+      if (item && item.id) qualityProbeResults.set(item.id, item);
+    }
+  }
+
+  function currentQualityReport() {
+    const items = qualityProbeCatalog.map((entry) => {
+      return qualityProbeResults.get(entry.id) || {
+        id: entry.id,
+        name: entry.name,
+        status: "pending",
+        label: "待检测",
+        http_status: null,
+        elapsed_ms: null,
+        detail: "等待检测",
+      };
+    });
+    const counts = { pass: 0, warning: 0, fail: 0, challenge: 0 };
+    for (const item of items) {
+      if (counts[item.status] != null) counts[item.status] += 1;
+    }
+    return {
+      ...blankQualityReport(),
+      ...(qualityReportMeta || {}),
+      counts,
+      items,
+    };
+  }
+
+  function openQualityReport() {
+    renderQualityReport(currentQualityReport());
+    showModal("modal-quality-report");
+  }
+
+  function siteProbeIcon(item) {
+    const id = String(item.id || "").replace(/^site-/, "");
+    const name = String(item.name || item.id || "");
+    const key = id || name.toLowerCase();
+    const icons = {
+      google: `<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#4285f4" d="M23.49 12.27c0-.79-.07-1.54-.2-2.27H12v4.29h6.47c-.28 1.5-1.13 2.77-2.41 3.62v3h3.89c2.27-2.09 3.54-5.17 3.54-8.64z"/><path fill="#34a853" d="M12 24c3.24 0 5.96-1.07 7.95-2.91l-3.89-3c-1.08.72-2.45 1.15-4.06 1.15-3.12 0-5.77-2.11-6.72-4.94H1.26v3.09C3.24 21.33 7.31 24 12 24z"/><path fill="#fbbc05" d="M5.28 14.3c-.24-.72-.38-1.49-.38-2.3s.14-1.58.38-2.3V6.61H1.26C.45 8.23 0 10.06 0 12s.45 3.77 1.26 5.39l4.02-3.09z"/><path fill="#ea4335" d="M12 4.76c1.76 0 3.35.61 4.59 1.8l3.44-3.44C17.95 1.18 15.23 0 12 0 7.31 0 3.24 2.67 1.26 6.61l4.02 3.09C6.23 6.87 8.88 4.76 12 4.76z"/></svg>`,
+      youtube: `<svg viewBox="0 0 24 24" aria-hidden="true"><rect width="22" height="15.5" x="1" y="4.25" rx="4.2" fill="#ff0000"/><path d="m10 8.15 6.35 3.85L10 15.85z" fill="#fff"/></svg>`,
+      netflix: `<svg viewBox="0 0 24 24" aria-hidden="true"><rect width="24" height="24" rx="6" fill="#111827"/><path d="M5.7 3.8h3.35v16.4H5.7z" fill="#b20710"/><path d="M14.95 3.8h3.35v16.4h-3.35z" fill="#b20710"/><path d="M9.05 3.8h3.25l6 16.4h-3.35z" fill="#e50914"/><path d="M9.05 3.8h3.25l2.75 7.52v8.88z" fill="#f6121d" opacity=".92"/><path d="M5.7 20.2c3.65-.55 8.95-.55 12.6 0v-1.05c-3.78-.62-8.82-.62-12.6 0z" fill="#000" opacity=".35"/></svg>`,
+      github: `<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#0f172a" d="M12 .7A11.3 11.3 0 0 0 8.43 22.73c.57.1.78-.24.78-.54v-1.92c-3.17.69-3.84-1.36-3.84-1.36-.52-1.31-1.26-1.66-1.26-1.66-1.03-.7.08-.69.08-.69 1.14.08 1.74 1.17 1.74 1.17 1.01 1.73 2.65 1.23 3.3.94.1-.73.4-1.23.72-1.51-2.53-.29-5.19-1.27-5.19-5.64 0-1.25.45-2.26 1.17-3.06-.12-.29-.51-1.45.11-3.02 0 0 .96-.31 3.12 1.17A10.8 10.8 0 0 1 12 6.23c.96 0 1.92.13 2.83.38 2.16-1.48 3.11-1.17 3.11-1.17.63 1.57.24 2.73.12 3.02.73.8 1.17 1.81 1.17 3.06 0 4.38-2.67 5.34-5.21 5.63.41.36.77 1.06.77 2.13v3.15c0 .3.2.65.79.54A11.3 11.3 0 0 0 12 .7z"/></svg>`,
+      openai: `<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#111827" d="M22.282 9.821a5.985 5.985 0 0 0-.516-4.911 6.046 6.046 0 0 0-6.51-2.9A6.065 6.065 0 0 0 4.981 4.182a5.985 5.985 0 0 0-3.998 2.9 6.046 6.046 0 0 0 .743 7.097 5.98 5.98 0 0 0 .511 4.91 6.051 6.051 0 0 0 6.515 2.9A5.985 5.985 0 0 0 13.26 24a6.056 6.056 0 0 0 5.772-4.206 5.989 5.989 0 0 0 3.998-2.9 6.056 6.056 0 0 0-.748-7.073ZM13.26 22.43a4.476 4.476 0 0 1-2.877-1.04l.142-.08 4.778-2.759a.795.795 0 0 0 .393-.681v-6.737l2.02 1.169a.071.071 0 0 1 .038.052v5.583a4.504 4.504 0 0 1-4.494 4.493ZM3.599 18.304a4.471 4.471 0 0 1-.535-3.014l.142.085 4.783 2.759a.771.771 0 0 0 .781 0l5.843-3.369v2.332a.08.08 0 0 1-.033.062L9.74 19.95a4.499 4.499 0 0 1-6.141-1.646ZM2.34 7.896a4.49 4.49 0 0 1 2.366-1.973v5.674c0 .28.15.54.393.682l5.837 3.363-2.02 1.168a.077.077 0 0 1-.071.006l-4.83-2.787A4.504 4.504 0 0 1 2.34 7.896Zm16.561 3.855-5.837-3.368 2.02-1.163a.077.077 0 0 1 .071-.007l4.83 2.787a4.5 4.5 0 0 1-.676 8.105v-5.673a.791.791 0 0 0-.408-.681Zm2.035-3.042-.142-.086-4.778-2.763a.792.792 0 0 0-.786 0L9.392 9.229V6.897a.08.08 0 0 1 .033-.062l4.83-2.787a4.5 4.5 0 0 1 6.681 4.661ZM8.302 12.863l-2.025-1.168a.077.077 0 0 1-.038-.052V6.064a4.499 4.499 0 0 1 7.377-3.453l-.142.081-4.778 2.759a.795.795 0 0 0-.393.681v6.731Zm1.088-2.378L12 8.978l2.61 1.507v3.014L12 15.006l-2.61-1.507v-3.014Z"/></svg>`,
+      cloudflare: `<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#f48120" d="M8.2 16.85h9.85a3.15 3.15 0 0 0 .18-6.29 5.82 5.82 0 0 0-11.1-1.78 4.09 4.09 0 0 0 1.07 8.07z"/><path fill="#faae40" d="M5.8 16.85h9.8a2.45 2.45 0 0 0 .12-4.9h-.76A4.55 4.55 0 0 0 6.06 10.2a3.22 3.22 0 0 0-.26 6.65z"/><path fill="#fff" d="M4.78 17.28h13.3a2.9 2.9 0 0 0 2.62-1.66 3.36 3.36 0 0 1-2.25.87H5.7a3.43 3.43 0 0 1-2.37-.94c.16 1.03.72 1.73 1.45 1.73z"/></svg>`,
+      wikipedia: `<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="11" fill="#fff" stroke="#cbd5e1"/><text x="12" y="16.7" text-anchor="middle" font-family="Georgia, 'Times New Roman', serif" font-size="13.8" font-weight="700" fill="#111827">W</text></svg>`,
+      microsoft: `<svg viewBox="0 0 24 24" aria-hidden="true"><rect width="9" height="9" x="3" y="3" fill="#f35325"/><rect width="9" height="9" x="12.8" y="3" fill="#81bc06"/><rect width="9" height="9" x="3" y="12.8" fill="#05a6f0"/><rect width="9" height="9" x="12.8" y="12.8" fill="#ffba08"/></svg>`,
+    };
+    if (key.includes("google")) return { text: "G", cls: "is-google", svg: icons.google };
+    if (key.includes("youtube")) return { text: "YT", cls: "is-youtube", svg: icons.youtube };
+    if (key.includes("netflix")) return { text: "N", cls: "is-netflix", svg: icons.netflix };
+    if (key.includes("github")) return { text: "GH", cls: "is-github", svg: icons.github };
+    if (key.includes("openai")) return { text: "AI", cls: "is-openai", svg: icons.openai };
+    if (key.includes("cloudflare")) return { text: "CF", cls: "is-cloudflare", svg: icons.cloudflare };
+    if (key.includes("wikipedia")) return { text: "W", cls: "is-wikipedia", svg: icons.wikipedia };
+    if (key.includes("microsoft")) return { text: "MS", cls: "is-microsoft", svg: icons.microsoft };
+    return { text: name.slice(0, 2).toUpperCase() || "?", cls: "is-generic", svg: "" };
+  }
+
+  function shortSiteProbeName(item) {
+    return String(item.name || item.id || "站点")
+      .replace(/\s*(可用性|解锁)$/u, "")
+      .replace(/^OpenAI$/u, "OpenAI");
+  }
+
+  async function refreshRuntimeConnections() {
+    try {
+      const res = await api("/api/connections");
+      const list = res.connections || [];
+      const totalUp = list.reduce((sum, item) => sum + (Number(item.upload) || 0), 0);
+      const totalDown = list.reduce((sum, item) => sum + (Number(item.download) || 0), 0);
+      const outbounds = new Set();
+      for (const item of list) {
+        const chain = item.chains || [];
+        const outbound = chain[chain.length - 1];
+        if (outbound) outbounds.add(outbound);
+      }
+      const outboundText = outbounds.size ? `出口 ${Array.from(outbounds).slice(0, 2).join("、")}${outbounds.size > 2 ? "…" : ""}` : "暂无活跃出口";
+      setRuntimeMetric(
+        "runtime-connections",
+        `${list.length} 活跃`,
+        `${outboundText} · 上传/下载 ${formatBytesSimple(totalUp)} / ${formatBytesSimple(totalDown)}`,
+        list.length ? "ok" : "",
+      );
+    } catch (e) {
+      setRuntimeMetric("runtime-connections", "读取失败", e.message || "无法读取连接", "bad");
+    }
+  }
+
+  function isUnlockProbe(item) {
+    const text = `${item.id || ""} ${item.name || ""}`.toLowerCase();
+    return text.includes("解锁") || text.includes("netflix") || text.includes("openai");
+  }
+
+  function siteProbeDisplay(item) {
+    const status = item.status || "pending";
+    const unlock = isUnlockProbe(item);
+    let label = "待检测";
+    if (status === "running") label = "检测中";
+    else if (status === "pass") label = unlock ? "已解锁" : "可访问";
+    else if (status === "warning") label = unlock ? "未解锁" : "访问受限";
+    else if (status === "challenge") label = "需验证";
+    else if (status === "fail") label = "检测失败";
+    return label;
+  }
+
+  function siteProbeLatencyText(item) {
+    if (item.elapsed_ms == null) return "-";
+    return `${item.elapsed_ms}ms`;
+  }
+
+  function currentNodePanelInfo() {
+    const name = currentNodeName || "";
+    const kind = currentSelectorData?.node_kinds?.[name] || {};
+    const health = currentSelectorData?.health?.[name] || {};
+    const parts = [];
+    if (kind.region_label || kind.region) parts.push(`地区 ${kind.region_label || kind.region}`);
+    if (kind.label) parts.push(`类型 ${kind.label}`);
+    if (kind.protocol_label) parts.push(`协议 ${kind.protocol_label}`);
+    if (kind.multiplier) parts.push(`倍率 ${kind.multiplier}`);
+    if (kind.link_type) parts.push(`链路 ${kind.link_type}`);
+    if (health.score != null) parts.push(`健康 ${health.score}`);
+    return parts;
+  }
+
+  function renderQualityReport(report) {
+    const body = $("quality-report-body");
+    if (!body || !report) return;
+    const counts = report.counts || {};
+    const items = Array.isArray(report.items) ? report.items : [];
+    const siteItems = items.filter((item) => String(item.id || "").startsWith("site-"));
+    const tableItems = items.filter((item) => !String(item.id || "").startsWith("site-"));
+    const meta = [
+      ["出口 IP", report.exit_ip || "未知"],
+      ["出口地区", report.exit_region || "未知"],
+      ["基础延迟", report.base_latency_ms == null ? "未知" : `${report.base_latency_ms}ms`],
+      ["检测时间", report.checked_at || "未知"],
+    ];
+    body.replaceChildren();
+
+    const summary = document.createElement("div");
+    summary.className = "quality-summary-card";
+    summary.innerHTML = `
+      <div>
+        <div class="quality-report-name"></div>
+        <div class="quality-counts"></div>
+        <div class="quality-node-info"></div>
+      </div>
+      <div class="quality-score">
+        <div class="quality-score-value"></div>
+        <div class="quality-score-grade"></div>
+      </div>
+      <div class="quality-meta-grid"></div>
+    `;
+    summary.querySelector(".quality-report-name").textContent = report.name || "nethub";
+    const pending = items.filter((item) => item.status === "pending" || item.status === "running").length;
+    summary.querySelector(".quality-counts").textContent =
+      `通过 ${counts.pass || 0} 项，告警 ${counts.warning || 0} 项，失败 ${counts.fail || 0} 项，挑战 ${counts.challenge || 0} 项，待检测 ${pending} 项`;
+    const nodeInfo = currentNodePanelInfo();
+    const nodeInfoEl = summary.querySelector(".quality-node-info");
+    if (nodeInfo.length) nodeInfoEl.textContent = nodeInfo.join(" · ");
+    else nodeInfoEl.classList.add("hidden");
+    summary.querySelector(".quality-score-value").textContent = report.score == null ? "--" : String(report.score);
+    summary.querySelector(".quality-score-grade").textContent = `等级 ${report.grade || "--"}`;
+    const metaGrid = summary.querySelector(".quality-meta-grid");
+    for (const [label, value] of meta) {
+      const el = document.createElement("div");
+      el.textContent = `${label}: ${value}`;
+      metaGrid.appendChild(el);
+    }
+    body.appendChild(summary);
+
+    if (siteItems.length) {
+      const sitePanel = document.createElement("div");
+      sitePanel.className = "quality-site-panel";
+      const siteHead = document.createElement("div");
+      siteHead.className = "quality-site-head";
+      const siteTitle = document.createElement("div");
+      siteTitle.className = "quality-site-title";
+      siteTitle.textContent = "常用网站 / 解锁";
+      const siteHint = document.createElement("div");
+      siteHint.className = "quality-site-hint";
+      const siteAvailable = siteItems.filter((item) => item.status === "pass").length;
+      siteHint.textContent = `${siteAvailable}/${siteItems.length} 可用或解锁`;
+      siteHead.appendChild(siteTitle);
+      siteHead.appendChild(siteHint);
+      sitePanel.appendChild(siteHead);
+
+      const siteGrid = document.createElement("div");
+      siteGrid.className = "quality-site-grid";
+      for (const item of siteItems) {
+        const card = document.createElement("button");
+        card.type = "button";
+        card.className = `quality-site-card ${qualityStatusClass(item.status)}`;
+        card.dataset.probeId = item.id;
+        card.disabled = item.status === "running";
+        card.title = item.detail || item.label || "点击单独检测";
+        const iconInfo = siteProbeIcon(item);
+        const icon = document.createElement("span");
+        icon.className = `quality-site-icon ${iconInfo.cls || "is-generic"}`;
+        if (iconInfo.svg) {
+          icon.innerHTML = iconInfo.svg;
+        } else {
+          const fallbackIcon = document.createElement("span");
+          fallbackIcon.className = "quality-site-icon-fallback";
+          fallbackIcon.textContent = iconInfo.text;
+          icon.appendChild(fallbackIcon);
+        }
+        const text = document.createElement("span");
+        text.className = "quality-site-text";
+        const name = document.createElement("span");
+        name.className = "quality-site-name";
+        name.textContent = shortSiteProbeName(item);
+        const metaLine = document.createElement("span");
+        metaLine.className = "quality-site-meta";
+        const statusLine = document.createElement("span");
+        statusLine.className = "quality-site-status-line";
+        statusLine.textContent = siteProbeDisplay(item);
+        const latencyLine = document.createElement("span");
+        latencyLine.className = "quality-site-latency-line";
+        latencyLine.textContent = siteProbeLatencyText(item);
+        metaLine.appendChild(statusLine);
+        metaLine.appendChild(latencyLine);
+        text.appendChild(name);
+        text.appendChild(metaLine);
+        card.appendChild(icon);
+        card.appendChild(text);
+        siteGrid.appendChild(card);
+      }
+      sitePanel.appendChild(siteGrid);
+      body.appendChild(sitePanel);
+    }
+
+    const tableWrap = document.createElement("div");
+    tableWrap.className = "quality-table-wrap";
+    const table = document.createElement("table");
+    table.className = "quality-table";
+    table.innerHTML = `
+      <thead>
+        <tr>
+          <th>检测项</th>
+          <th>状态</th>
+          <th>HTTP</th>
+          <th>延迟</th>
+          <th>说明</th>
+          <th>操作</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    `;
+    const tbody = table.querySelector("tbody");
+    for (const item of tableItems) {
+      const tr = document.createElement("tr");
+      const tdName = document.createElement("td");
+      tdName.textContent = item.name || item.id || "检测项";
+      const tdStatus = document.createElement("td");
+      const pill = document.createElement("span");
+      pill.className = `quality-status-pill ${qualityStatusClass(item.status)}`;
+      pill.textContent = item.label || "失败";
+      tdStatus.appendChild(pill);
+      const tdHttp = document.createElement("td");
+      tdHttp.textContent = item.http_status == null ? "-" : String(item.http_status);
+      const tdLatency = document.createElement("td");
+      tdLatency.textContent = item.elapsed_ms == null ? "-" : `${item.elapsed_ms}ms`;
+      const tdDetail = document.createElement("td");
+      tdDetail.textContent = item.detail || "";
+      const tdAction = document.createElement("td");
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "btn-secondary quality-row-action";
+      btn.dataset.probeId = item.id;
+      btn.textContent = item.status === "running" ? "检测中" : "检测";
+      btn.disabled = item.status === "running";
+      tdAction.appendChild(btn);
+      tr.appendChild(tdName);
+      tr.appendChild(tdStatus);
+      tr.appendChild(tdHttp);
+      tr.appendChild(tdLatency);
+      tr.appendChild(tdDetail);
+      tr.appendChild(tdAction);
+      tbody.appendChild(tr);
+    }
+    tableWrap.appendChild(table);
+    body.appendChild(tableWrap);
+  }
+
+  async function runQualityProbes(ids) {
+    const runAll = !Array.isArray(ids) || ids.length === 0;
+    const selectedIds = runAll ? qualityProbeCatalog.map((item) => item.id) : ids;
+    const allBtn = $("btn-quality-run-all");
+    if (allBtn && runAll) allBtn.disabled = true;
+    for (const id of selectedIds) {
+      const entry = qualityProbeCatalog.find((item) => item.id === id);
+      qualityProbeResults.set(id, {
+        id,
+        name: entry ? entry.name : id,
+        status: "running",
+        label: "检测中",
+        http_status: null,
+        elapsed_ms: null,
+        detail: "正在检测...",
+      });
+    }
+    renderQualityReport(currentQualityReport());
+    try {
+      const data = await api("/api/site-probes", {
+        method: "POST",
+        body: JSON.stringify({ timeout_ms: 12000, ids: selectedIds, node_name: currentNodeName || "" }),
+      });
+      if (Array.isArray(data.catalog) && data.catalog.length) {
+        qualityProbeCatalog = data.catalog;
+      }
+      mergeQualityReport(data);
+      renderQualityReport(currentQualityReport());
+    } catch (e) {
+      for (const id of selectedIds) {
+        const entry = qualityProbeCatalog.find((item) => item.id === id);
+        qualityProbeResults.set(id, {
+          id,
+          name: entry ? entry.name : id,
+          status: "fail",
+          label: "失败",
+          http_status: null,
+          elapsed_ms: null,
+          detail: e.message || String(e),
+        });
+      }
+      renderQualityReport(currentQualityReport());
+    } finally {
+      if (allBtn) allBtn.disabled = false;
+    }
+  }
+
   async function switchToNode(name) {
     const msg = $("apply-msg");
     show(msg, true);
@@ -675,7 +1138,7 @@
     const nowTs = Date.now();
 
     for (const name of filtered) {
-      const card = buildNodeCard(name, now);
+      const card = buildNodeCard(name, now, data.node_kinds && data.node_kinds[name]);
       wrap.appendChild(card);
       setCardHealth(card, data.health && data.health[name]);
 
@@ -1485,9 +1948,36 @@
         ? `后台刷新 ${refresh.interval_minutes}m，最近成功 ${refresh.last_refreshed || 0} 个`
         : "后台刷新关闭";
       detail.textContent = `库 ${s.enabled_vault_count}/${s.vault_count}，订阅 ${s.subscription_vault_count}，健康均分 ${s.health_avg_score ?? "未知"}，异常 ${s.health_degraded_count}；${refreshText}`;
+      const avg = s.health_avg_score;
+      setRuntimeMetric(
+        "runtime-health",
+        avg == null ? "未测速" : `${avg} 分`,
+        `${s.health_degraded_count || 0} 个异常 · ${s.node_count || 0} 个节点`,
+        avg == null ? "warn" : avg >= 70 ? "ok" : avg >= 45 ? "warn" : "bad",
+      );
+      setRuntimeMetric(
+        "runtime-subscription",
+        `${s.subscription_vault_count || 0} 个订阅库`,
+        refreshText,
+        refresh.enabled ? "ok" : "",
+      );
+      const authText = s.http_proxy_auth_required ? "已启用鉴权" : "无需鉴权";
+      const httpsText = s.https_proxy_enabled ? "HTTPS 已启用" : "HTTPS 未启用";
+      const publicPort = s.http_proxy_public_port || s.http_proxy_port || 2080;
+      const internalPort = s.http_proxy_internal_port || publicPort;
+      const portText = publicPort === internalPort ? `内部 :${internalPort}` : `公网 :${publicPort} · 内部 :${internalPort}`;
+      setRuntimeMetric(
+        "runtime-proxy",
+        s.config_exists ? `HTTP :${publicPort}` : "配置缺失",
+        `${portText} · ${authText} · ${httpsText}`,
+        s.config_exists ? "ok" : "warn",
+      );
     } catch (e) {
       stat.textContent = "总览不可用";
       detail.textContent = e.message || "无法读取网关状态";
+      setRuntimeMetric("runtime-health", "读取失败", "无法读取节点健康", "bad");
+      setRuntimeMetric("runtime-subscription", "读取失败", "无法读取订阅状态", "bad");
+      setRuntimeMetric("runtime-proxy", "读取失败", "无法读取代理入口状态", "bad");
     }
   }
 
@@ -1500,13 +1990,21 @@
       text.textContent = h.clash_ok
         ? `内核接口正常 (状态 ${h.clash_http_status})`
         : `内核接口异常 (状态 ${h.clash_http_status})`;
+      setRuntimeMetric(
+        "runtime-core",
+        h.clash_ok ? "在线" : "异常",
+        `Clash API 状态 ${h.clash_http_status ?? "未知"}`,
+        h.clash_ok ? "ok" : "bad",
+      );
       show(text, true);
     } catch (e) {
       text.classList.add("is-error");
       text.textContent = "内核连接失败: " + (e.message || String(e));
+      setRuntimeMetric("runtime-core", "离线", e.message || "无法连接 Clash API", "bad");
       show(text, true);
     }
     refreshGatewaySummary().catch(() => {});
+    refreshRuntimeConnections().catch(() => {});
   }
 
   // —— 自动切换逻辑 ——
@@ -1678,6 +2176,7 @@
     renderVaultManageTable().catch(() => {});
     loadMain(meta).catch(() => {});
     initAutoSwitch();
+    preventModalScrollLeak();
 
     // 优先绑定交互监听器，避免数据加载阻塞 UI 交互
     const btnReset = $("btn-vault-reset");
@@ -1855,6 +2354,25 @@
         btn.disabled = false;
       }
     });
+
+    const btnSiteProbe = $("btn-site-probe");
+    if (btnSiteProbe) {
+      btnSiteProbe.addEventListener("click", openQualityReport);
+    }
+
+    const btnQualityRunAll = $("btn-quality-run-all");
+    if (btnQualityRunAll) {
+      btnQualityRunAll.addEventListener("click", () => runQualityProbes());
+    }
+
+    const qualityBody = $("quality-report-body");
+    if (qualityBody) {
+      qualityBody.addEventListener("click", (ev) => {
+        const btn = ev.target.closest("[data-probe-id]");
+        if (!btn || btn.disabled) return;
+        runQualityProbes([btn.dataset.probeId]);
+      });
+    }
 
     $("node-cards").addEventListener("click", async (ev) => {
       const card = ev.target.closest(".node-card");

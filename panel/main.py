@@ -15,11 +15,13 @@ import socket
 import sys
 import time
 import zipfile
+import re
 from collections import deque
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from threading import Lock
+from typing import Any
 from urllib.parse import quote
 from urllib.parse import urlparse
 
@@ -58,6 +60,96 @@ DEFAULT_DELAY_TEST_URL = os.environ.get(
     "PANEL_DELAY_TEST_URL",
     "https://www.gstatic.com/generate_204",
 ).strip()
+DEFAULT_PROXY_TEST_TARGETS = [
+    {
+        "id": "google",
+        "name": "Google",
+        "url": "https://www.google.com/generate_204",
+        "expect_status": [204],
+    },
+    {
+        "id": "youtube",
+        "name": "YouTube",
+        "url": "https://www.youtube.com/generate_204",
+        "expect_status": [204],
+    },
+    {
+        "id": "netflix",
+        "name": "Netflix",
+        "url": "https://www.netflix.com/title/80018499",
+        "expect_status": [200, 301, 302],
+        "blocked_markers": ["not available in your area", "unavailable in your location", "netflix site error"],
+    },
+    {
+        "id": "github",
+        "name": "GitHub",
+        "url": "https://github.com/",
+        "expect_status": [200],
+    },
+    {
+        "id": "openai",
+        "name": "OpenAI",
+        "url": "https://chatgpt.com/",
+        "expect_status": [200],
+        "blocked_markers": ["unsupported country", "not available in your country", "access denied"],
+    },
+]
+QUALITY_PROBE_TARGETS = [
+    {
+        "id": "openai",
+        "name": "OpenAI",
+        "url": "https://api.openai.com/v1/models",
+        "expect_status": [200],
+        "warn_status": [401, 403, 405],
+        "warn_detail": "目标可达，但鉴权或方法受限",
+    },
+    {
+        "id": "anthropic",
+        "name": "Anthropic",
+        "url": "https://api.anthropic.com/v1/messages",
+        "expect_status": [200],
+        "warn_status": [401, 403, 405],
+        "warn_detail": "目标可达，但鉴权或方法受限",
+    },
+    {
+        "id": "gemini",
+        "name": "Gemini",
+        "url": "https://generativelanguage.googleapis.com/$discovery/rest?version=v1beta",
+        "expect_status": [200],
+        "warn_status": [401, 403, 405],
+        "warn_detail": "目标可达，但鉴权或方法受限",
+    },
+]
+QUALITY_SITE_TARGETS = [
+    {
+        **target,
+        "id": f"site-{target['id']}",
+        "name": f"{target['name']} {'解锁' if target.get('blocked_markers') else '可用性'}",
+    }
+    for target in DEFAULT_PROXY_TEST_TARGETS
+]
+QUALITY_SITE_TARGETS.extend(
+    [
+        {
+            "id": "site-cloudflare",
+            "name": "Cloudflare 可用性",
+            "url": "https://www.cloudflare.com/cdn-cgi/trace",
+            "expect_status": [200],
+        },
+        {
+            "id": "site-wikipedia",
+            "name": "Wikipedia 可用性",
+            "url": "https://www.wikipedia.org/",
+            "expect_status": [200],
+        },
+        {
+            "id": "site-microsoft",
+            "name": "Microsoft 可用性",
+            "url": "http://www.msftconnecttest.com/connecttest.txt",
+            "expect_status": [200],
+        },
+    ]
+)
 _CSRF_SESSION_KEY = "csrf_token"
 _STARTED_AT = time.time()
 _refresh_state: dict[str, object] = {
@@ -836,6 +928,11 @@ async def api_gateway_summary(request: Request):
         "node_count": sum(int(v.get("node_count") or 0) for v in vaults),
         "health_avg_score": avg_score,
         "health_degraded_count": degraded,
+        "http_proxy_port": _http_proxy_public_port(),
+        "http_proxy_public_port": _http_proxy_public_port(),
+        "http_proxy_internal_port": _http_proxy_port(),
+        "http_proxy_auth_required": _http_proxy_auth_required(),
+        "https_proxy_enabled": os.environ.get("SINGBOX_HTTPS_PROXY_ENABLED", "").strip().lower() in ("1", "true", "yes", "on"),
         "background_refresh": dict(_refresh_state),
     }
 
@@ -921,6 +1018,151 @@ async def api_selector_summary(request: Request):
     enabled_vaults = set(_enabled_vault_names())
     filtered_nodes = []
     node_types = {}
+    node_kinds = {}
+
+    def protocol_label(proxy_type: str) -> str:
+        normalized = (proxy_type or "unknown").strip().lower()
+        return {
+            "hysteria2": "HY2",
+            "hysteria": "HY",
+            "shadowsocks": "SS",
+            "vmess": "VMess",
+            "vless": "VLESS",
+            "trojan": "Trojan",
+            "tuic": "TUIC",
+            "direct": "Direct",
+        }.get(normalized, normalized.upper() if normalized and normalized != "unknown" else "未知")
+
+    def detect_region(node_name: str) -> str:
+        normalized = node_name.lower()
+        region_rules = (
+            ("香港", (r"\bhk\d*\b", r"\bhkg\d*\b", "香港", "港")),
+            ("日本", (r"\bjp\d*\b", r"\bjpn\d*\b", "日本", "东京", "大阪")),
+            ("新加坡", (r"\bsg\d*\b", r"\bsgp\d*\b", "新加坡", "狮城")),
+            ("美国", (r"\bus\d*\b", r"\busa\d*\b", "美国", "美西", "美东", "洛杉矶", "圣何塞", "纽约")),
+            ("台湾", (r"\btw\d*\b", r"\btwn\d*\b", "台湾", "台北")),
+            ("韩国", (r"\bkr\d*\b", r"\bkor\d*\b", "韩国", "首尔")),
+            ("英国", (r"\buk\b", r"\bgb\b", "英国", "伦敦")),
+            ("德国", (r"\bde\b", r"\bdeu\b", "德国", "法兰克福")),
+            ("法国", (r"\bfr\b", r"\bfra\b", "法国", "巴黎")),
+            ("加拿大", (r"\bca\b", r"\bcan\b", "加拿大", "多伦多", "温哥华")),
+            ("澳大利亚", (r"\bau\b", r"\baus\b", "澳大利亚", "澳洲", "悉尼")),
+            ("荷兰", (r"\bnl\b", r"\bnld\b", "荷兰", "阿姆斯特丹")),
+            ("俄罗斯", (r"\bru\b", r"\brus\b", "俄罗斯", "莫斯科")),
+        )
+        for label, patterns in region_rules:
+            for pattern in patterns:
+                if pattern.startswith(r"\b"):
+                    if re.search(pattern, normalized, re.IGNORECASE):
+                        return label
+                elif pattern in node_name or pattern.lower() in normalized:
+                    return label
+        return ""
+
+    def detect_multiplier(node_name: str) -> str:
+        patterns = (
+            r"(?i)(?:^|[\s\-_｜|·\[\(])(\d+(?:\.\d+)?)\s*[xｘ倍倍率]",
+            r"(?i)(?:倍率|rate|ratio)\s*[:：]?\s*(\d+(?:\.\d+)?)\s*[xｘ倍]?",
+        )
+        for pattern in patterns:
+            found = re.search(pattern, node_name)
+            if found:
+                raw = found.group(1)
+                return f"{raw}x"
+        return ""
+
+    def detect_link_type(combined: str) -> str:
+        if "iplc" in combined:
+            return "IPLC"
+        if "iepl" in combined:
+            return "IEPL"
+        if "专线" in combined:
+            return "专线"
+        if any(term in combined for term in ("中转", "relay", "隧道", "tunnel")):
+            return "中转"
+        if any(term in combined for term in ("直连", "direct")):
+            return "直连"
+        return ""
+
+    def node_meta(node_name: str, combined: str, proxy_type: str) -> dict[str, str]:
+        region = detect_region(node_name)
+        multiplier = detect_multiplier(node_name)
+        link_type = detect_link_type(combined)
+        return {
+            "protocol": proxy_type,
+            "protocol_label": protocol_label(proxy_type),
+            "region": region,
+            "region_label": region,
+            "multiplier": multiplier,
+            "link_type": link_type,
+        }
+
+    def classify_node_kind(node_name: str, proxy_info: dict | None = None) -> dict[str, str]:
+        text = node_name.lower()
+        server = str((proxy_info or {}).get("server") or "").lower()
+        proxy_type = str((proxy_info or {}).get("type") or "unknown")
+        combined = f"{text} {server}"
+        meta = node_meta(node_name, combined, proxy_type)
+        residential_terms = (
+            "住宅",
+            "家宽",
+            "家庭宽带",
+            "原生",
+            "residential",
+            "home",
+            "isp",
+            "native",
+        )
+        airport_terms = (
+            "机场",
+            "订阅",
+            "专线",
+            "中转",
+            "隧道",
+            "iplc",
+            "iepl",
+            "relay",
+            "tunnel",
+            "落地",
+        )
+        if any(term in combined for term in residential_terms):
+            return {
+                "kind": "residential",
+                "label": "住宅",
+                "reason": "名称或地址包含住宅/家宽特征",
+                **meta,
+            }
+        if any(term in combined for term in airport_terms):
+            return {
+                "kind": "airport",
+                "label": "机场",
+                "reason": "名称包含机场/专线/中转特征",
+                **meta,
+            }
+        if " · " in node_name:
+            vault_name = node_name.split(" · ", 1)[0]
+            vault = next((v for v in _list_vaults() if v.get("name") == vault_name), None)
+            if vault and vault.get("source_kind") == "subscription":
+                return {
+                    "kind": "airport",
+                    "label": "机场",
+                    "reason": "来自订阅节点库",
+                    **meta,
+                }
+        if proxy_info and proxy_type.lower() not in ("direct", "block", "dns", "unknown"):
+            return {
+                "kind": "airport",
+                "label": "机场",
+                "reason": "代理协议节点，未识别为住宅时默认归为机场/代理服务节点",
+                **meta,
+            }
+        return {
+            "kind": "other",
+            "label": "其它",
+            "reason": "未识别到住宅或机场特征",
+            **meta,
+        }
+
     for node in all_nodes:
         if not isinstance(node, str):
             continue
@@ -935,12 +1177,16 @@ async def api_selector_summary(request: Request):
         proxy_info = proxies.get(node)
         if isinstance(proxy_info, dict):
             node_types[node] = proxy_info.get("type", "unknown")
+            node_kinds[node] = classify_node_kind(node, proxy_info)
+        else:
+            node_kinds[node] = classify_node_kind(node)
 
     return {
         "tag": SELECTOR_TAG,
         "now": str(sel.get("now") or ""),
         "all": filtered_nodes,
         "types": node_types,
+        "node_kinds": node_kinds,
         "health": HEALTH_STORE.snapshot(),
     }
 
@@ -965,6 +1211,12 @@ class ProxyDelayBody(BaseModel):
     test_url: str | None = None
 
 
+class SiteProbeBody(BaseModel):
+    timeout_ms: int | None = 12000
+    ids: list[str] | None = None
+    node_name: str | None = Field(None, max_length=512)
+
+
 def _latency_tier_ms(delay_ms: int | None) -> str:
     if delay_ms is None:
         return "—"
@@ -977,6 +1229,687 @@ def _latency_tier_ms(delay_ms: int | None) -> str:
     if delay_ms < 800:
         return "一般 (2-10M/s)"
     return "较慢 (<2M/s)"
+
+
+def _http_proxy_port() -> int:
+    try:
+        data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+        for inbound in data.get("inbounds") or []:
+            if isinstance(inbound, dict) and inbound.get("type") == "http":
+                return int(inbound.get("listen_port") or 2080)
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        pass
+    return int(os.environ.get("SINGBOX_HTTP_PORT", "2080") or "2080")
+
+
+def _http_proxy_public_port() -> int:
+    try:
+        return int(os.environ.get("SINGBOX_HTTP_PORT", "2080") or "2080")
+    except ValueError:
+        return _http_proxy_port()
+
+
+def _http_proxy_credentials() -> tuple[str, str] | None:
+    user = os.environ.get("SINGBOX_HTTP_USER", "").strip()
+    password = os.environ.get("SINGBOX_HTTP_PASS", "").strip()
+    if user and password:
+        return user, password
+    try:
+        data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+        for inbound in data.get("inbounds") or []:
+            if not isinstance(inbound, dict) or inbound.get("type") != "http":
+                continue
+            users = inbound.get("users") or []
+            if not isinstance(users, list) or not users:
+                continue
+            first = users[0] if isinstance(users[0], dict) else {}
+            cfg_user = str(first.get("username") or "").strip()
+            cfg_password = str(first.get("password") or "").strip()
+            if cfg_user and cfg_password:
+                return cfg_user, cfg_password
+    except (OSError, json.JSONDecodeError, TypeError):
+        pass
+    return None
+
+
+def _http_proxy_auth_required() -> bool:
+    if _http_proxy_credentials() is not None:
+        return True
+    try:
+        data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+        for inbound in data.get("inbounds") or []:
+            if isinstance(inbound, dict) and inbound.get("type") == "http" and inbound.get("users"):
+                return True
+    except (OSError, json.JSONDecodeError, TypeError):
+        pass
+    return False
+
+
+def _http_proxy_url() -> str:
+    override = os.environ.get("PANEL_PROBE_PROXY_URL", "").strip()
+    if override:
+        return override
+    port = _http_proxy_port()
+    credentials = _http_proxy_credentials()
+    parsed = urlparse(CLASH_BASE)
+    host = parsed.hostname or "127.0.0.1"
+    if host in ("0.0.0.0", "::", ""):
+        host = "127.0.0.1"
+    if credentials is not None:
+        user, password = credentials
+        return f"http://{quote(user, safe='')}:{quote(password, safe='')}@{host}:{port}"
+    return f"http://{host}:{port}"
+
+
+def _probe_status_to_report(status: str) -> str:
+    if status in ("ok", "unlocked", "disabled", "not_required"):
+        return "pass"
+    if status == "restricted":
+        return "warning"
+    if status == "challenge":
+        return "challenge"
+    return "fail"
+
+
+def _report_status_label(status: str) -> str:
+    return {
+        "pass": "通过",
+        "warning": "告警",
+        "fail": "失败",
+        "challenge": "挑战",
+    }.get(status, "失败")
+
+
+def _score_grade(score: int) -> str:
+    if score >= 90:
+        return "A"
+    if score >= 80:
+        return "B"
+    if score >= 65:
+        return "C"
+    if score >= 50:
+        return "D"
+    return "E"
+
+
+def _http_error_detail(e: BaseException) -> str:
+    detail = str(e).strip()
+    if detail:
+        return detail[:240]
+    name = e.__class__.__name__
+    if isinstance(e, httpx.TimeoutException):
+        return f"{name}: 请求超时"
+    if isinstance(e, httpx.ProxyError):
+        return f"{name}: 代理连接或鉴权失败"
+    if isinstance(e, httpx.ConnectError):
+        return f"{name}: 连接失败"
+    if isinstance(e, httpx.ReadError):
+        return f"{name}: 读取响应失败，可能被远端断开"
+    if isinstance(e, httpx.RemoteProtocolError):
+        return f"{name}: 远端协议异常"
+    return name or "未知错误"
+
+
+def _format_exit_region(region: str) -> str:
+    raw = str(region or "").strip()
+    if not raw:
+        return ""
+    code = raw.upper()
+    names = {
+        "HK": "香港",
+        "TW": "台湾",
+        "JP": "日本",
+        "SG": "新加坡",
+        "US": "美国",
+        "USA": "美国",
+        "GB": "英国",
+        "UK": "英国",
+        "KR": "韩国",
+        "DE": "德国",
+        "FR": "法国",
+        "CA": "加拿大",
+        "AU": "澳大利亚",
+        "NL": "荷兰",
+        "RU": "俄罗斯",
+        "CN": "中国大陆",
+        "MO": "澳门",
+        "MY": "马来西亚",
+        "TH": "泰国",
+        "VN": "越南",
+        "PH": "菲律宾",
+        "ID": "印度尼西亚",
+        "IN": "印度",
+        "TR": "土耳其",
+        "BR": "巴西",
+        "MX": "墨西哥",
+        "ES": "西班牙",
+        "IT": "意大利",
+        "SE": "瑞典",
+        "NO": "挪威",
+        "FI": "芬兰",
+        "DK": "丹麦",
+        "PL": "波兰",
+        "CH": "瑞士",
+        "AE": "阿联酋",
+        "IL": "以色列",
+        "ZA": "南非",
+    }
+    if code in names:
+        return names[code]
+    english_names = {
+        "hong kong": "香港",
+        "taiwan": "台湾",
+        "japan": "日本",
+        "singapore": "新加坡",
+        "united states": "美国",
+        "united states of america": "美国",
+        "usa": "美国",
+        "united kingdom": "英国",
+        "great britain": "英国",
+        "south korea": "韩国",
+        "korea": "韩国",
+        "germany": "德国",
+        "france": "法国",
+        "canada": "加拿大",
+        "australia": "澳大利亚",
+        "netherlands": "荷兰",
+        "russia": "俄罗斯",
+        "china": "中国大陆",
+        "macau": "澳门",
+        "macao": "澳门",
+        "malaysia": "马来西亚",
+        "thailand": "泰国",
+        "vietnam": "越南",
+        "philippines": "菲律宾",
+        "indonesia": "印度尼西亚",
+        "india": "印度",
+        "turkey": "土耳其",
+        "brazil": "巴西",
+        "mexico": "墨西哥",
+        "spain": "西班牙",
+        "italy": "意大利",
+        "sweden": "瑞典",
+        "norway": "挪威",
+        "finland": "芬兰",
+        "denmark": "丹麦",
+        "poland": "波兰",
+        "switzerland": "瑞士",
+        "united arab emirates": "阿联酋",
+        "israel": "以色列",
+        "south africa": "南非",
+    }
+    lowered = raw.lower()
+    if lowered in english_names:
+        return english_names[lowered]
+    return raw
+
+
+async def _probe_exit_ip(timeout_ms: int) -> dict[str, str]:
+    timeout = httpx.Timeout(max(3.0, min(timeout_ms / 1000, 15.0)), connect=4.0)
+    sources = (
+        ("ipapi", "https://ipapi.co/json/"),
+        ("ipinfo", "https://ipinfo.io/json"),
+        ("ipwho", "https://ipwho.is/"),
+        ("cloudflare", "https://www.cloudflare.com/cdn-cgi/trace"),
+    )
+
+    def parse_exit_info(source: str, text: str) -> dict[str, str]:
+        if source == "cloudflare":
+            info = {}
+            for line in text.splitlines():
+                if "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                info[key.strip()] = value.strip()
+            return {"ip": info.get("ip", ""), "region": _format_exit_region(info.get("loc", ""))}
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            return {"ip": "", "region": ""}
+        region = str(
+            data.get("country_name")
+            or data.get("country")
+            or data.get("country_code")
+            or data.get("region")
+            or ""
+        )
+        return {
+            "ip": str(data.get("ip") or data.get("query") or ""),
+            "region": _format_exit_region(region),
+        }
+
+    try:
+        async with httpx.AsyncClient(proxy=_http_proxy_url(), timeout=timeout, follow_redirects=True) as client:
+            for source, url in sources:
+                try:
+                    r = await client.get(url, headers={"User-Agent": "NetHub-Probe/1.0"})
+                except httpx.HTTPError:
+                    continue
+                if not r.is_success:
+                    continue
+                parsed = parse_exit_info(source, r.text)
+                if parsed.get("ip"):
+                    return parsed
+    except Exception:
+        pass
+    return {"ip": "", "region": ""}
+
+
+async def _probe_report_item(target: dict[str, Any], timeout_ms: int) -> dict[str, Any]:
+    name = str(target.get("name") or target.get("id") or "检测项")
+    url = str(target.get("url") or "")
+    expect_status = set(int(s) for s in target.get("expect_status") or [])
+    warn_status = set(int(s) for s in target.get("warn_status") or [])
+    start = time.perf_counter()
+    timeout = httpx.Timeout(max(3.0, min(timeout_ms / 1000, 30.0)), connect=6.0)
+    try:
+        async with httpx.AsyncClient(
+            proxy=_http_proxy_url(),
+            timeout=timeout,
+            follow_redirects=False,
+            headers={"User-Agent": "NetHub-Probe/1.0"},
+        ) as client:
+            r = await client.get(url)
+        elapsed_ms = int((time.perf_counter() - start) * 1000)
+        if r.status_code in expect_status or (not expect_status and r.is_success):
+            status = "pass"
+            detail = f"HTTP {r.status_code}"
+        elif r.status_code in warn_status:
+            status = "warning"
+            detail = f"HTTP {r.status_code}（{target.get('warn_detail') or '目标可达，但可能受限'}）"
+        elif r.status_code in (429, 503):
+            status = "challenge"
+            detail = f"HTTP {r.status_code}（可能遇到风控或挑战）"
+        else:
+            status = "fail"
+            detail = f"HTTP {r.status_code}"
+        return {
+            "id": target.get("id"),
+            "name": name,
+            "status": status,
+            "label": _report_status_label(status),
+            "http_status": r.status_code,
+            "elapsed_ms": elapsed_ms,
+            "detail": detail,
+        }
+    except httpx.HTTPError as e:
+        elapsed_ms = int((time.perf_counter() - start) * 1000)
+        return {
+            "id": target.get("id"),
+            "name": name,
+            "status": "fail",
+            "label": "失败",
+            "http_status": None,
+            "elapsed_ms": elapsed_ms,
+            "detail": f"请求失败: {_http_error_detail(e)}",
+        }
+
+
+async def _basic_connectivity_item(timeout_ms: int) -> dict[str, Any]:
+    start = time.perf_counter()
+    timeout = httpx.Timeout(max(3.0, min(timeout_ms / 1000, 15.0)), connect=4.0)
+    targets = (
+        ("Google 204", DEFAULT_DELAY_TEST_URL),
+        ("Cloudflare trace", "https://www.cloudflare.com/cdn-cgi/trace"),
+        ("GitHub", "https://github.com/"),
+        ("Microsoft", "http://www.msftconnecttest.com/connecttest.txt"),
+    )
+    last_detail = ""
+    try:
+        async with httpx.AsyncClient(proxy=_http_proxy_url(), timeout=timeout, follow_redirects=False) as client:
+            for label, url in targets:
+                try:
+                    r = await client.get(url, headers={"User-Agent": "NetHub-Probe/1.0"})
+                except httpx.HTTPError as e:
+                    last_detail = f"{label}: {_http_error_detail(e)}"
+                    continue
+                elapsed_ms = int((time.perf_counter() - start) * 1000)
+                if r.status_code == 407:
+                    last_detail = f"{label}: 代理鉴权失败"
+                    continue
+                if r.status_code < 500:
+                    return {
+                        "id": "basic",
+                        "name": "基础连通性",
+                        "status": "pass",
+                        "label": "通过",
+                        "http_status": None if r.status_code in (204, 200) else r.status_code,
+                        "elapsed_ms": elapsed_ms,
+                        "detail": f"代理出口连通正常（{label}）",
+                    }
+                last_detail = f"{label}: HTTP {r.status_code}"
+        elapsed_ms = int((time.perf_counter() - start) * 1000)
+        return {
+            "id": "basic",
+            "name": "基础连通性",
+            "status": "fail",
+            "label": "失败",
+            "http_status": None,
+            "elapsed_ms": elapsed_ms,
+            "detail": last_detail or "所有基础连通目标均未通过",
+        }
+    except httpx.HTTPError as e:
+        elapsed_ms = int((time.perf_counter() - start) * 1000)
+        return {
+            "id": "basic",
+            "name": "基础连通性",
+            "status": "fail",
+            "label": "失败",
+            "http_status": None,
+            "elapsed_ms": elapsed_ms,
+            "detail": f"请求失败: {_http_error_detail(e)}",
+        }
+
+
+async def _panel_auth_report_item() -> dict[str, Any]:
+    return {
+        "id": "panel-auth",
+        "name": "面板鉴权 / CSRF",
+        "status": "pass",
+        "label": "通过",
+        "http_status": None,
+        "elapsed_ms": 0,
+        "detail": "当前检测请求已经通过面板登录态与 CSRF 校验。",
+    }
+
+
+async def _clash_auth_report_item() -> dict[str, Any]:
+    check = await _clash_auth_probe()
+    report_status = _probe_status_to_report(str(check.get("status") or "fail"))
+    return {
+        "id": check.get("id"),
+        "name": check.get("name"),
+        "status": report_status,
+        "label": _report_status_label(report_status),
+        "http_status": check.get("http_status"),
+        "elapsed_ms": check.get("elapsed_ms"),
+        "detail": check.get("detail") or check.get("error") or check.get("label") or "",
+    }
+
+
+async def _proxy_auth_report_item(timeout_ms: int) -> dict[str, Any]:
+    check = await _proxy_auth_probe(timeout_ms)
+    report_status = _probe_status_to_report(str(check.get("status") or "fail"))
+    return {
+        "id": check.get("id"),
+        "name": check.get("name"),
+        "status": report_status,
+        "label": _report_status_label(report_status),
+        "http_status": check.get("http_status"),
+        "elapsed_ms": check.get("elapsed_ms"),
+        "detail": check.get("detail") or check.get("error") or check.get("label") or "",
+    }
+
+
+def _quality_probe_catalog() -> list[dict[str, str]]:
+    return [
+        {"id": "basic", "name": "基础连通性"},
+        {"id": "panel-auth", "name": "面板鉴权 / CSRF"},
+        {"id": "clash-auth", "name": "Clash API Auth"},
+        {"id": "proxy-auth", "name": "HTTP 代理鉴权"},
+        *[{"id": str(t["id"]), "name": str(t["name"])} for t in QUALITY_SITE_TARGETS],
+        *[{"id": str(t["id"]), "name": str(t["name"])} for t in QUALITY_PROBE_TARGETS],
+    ]
+
+
+def _quality_report_from_items(
+    items: list[dict[str, Any]],
+    exit_info: dict[str, str] | None = None,
+    *,
+    name: str = "nethub",
+) -> dict[str, Any]:
+    counts = {
+        "pass": sum(1 for item in items if item.get("status") == "pass"),
+        "warning": sum(1 for item in items if item.get("status") == "warning"),
+        "fail": sum(1 for item in items if item.get("status") == "fail"),
+        "challenge": sum(1 for item in items if item.get("status") == "challenge"),
+    }
+    basic_item = next((item for item in items if item.get("id") == "basic"), {})
+    total = max(1, len(items))
+    score = 100
+    score -= int(counts["fail"] * 55 / total)
+    score -= int(counts["warning"] * 25 / total)
+    score -= int(counts["challenge"] * 35 / total)
+    score -= min(18, max(0, int(basic_item.get("elapsed_ms") or 0) - 80) // 25)
+    score = max(0, min(100, score))
+    info = exit_info or {}
+    return {
+        "name": name.strip() or "nethub",
+        "score": score,
+        "grade": _score_grade(score),
+        "counts": counts,
+        "exit_ip": info.get("ip") or "",
+        "exit_region": info.get("region") or "",
+        "base_latency_ms": basic_item.get("elapsed_ms"),
+        "checked_at": datetime.now().strftime("%Y/%m/%d %H:%M:%S"),
+        "items": items,
+    }
+
+
+async def _run_quality_probe_ids(ids: list[str], timeout_ms: int) -> tuple[list[dict[str, Any]], dict[str, str]]:
+    target_by_id = {str(t["id"]): t for t in QUALITY_PROBE_TARGETS}
+    site_target_by_id = {str(t["id"]): t for t in QUALITY_SITE_TARGETS}
+
+    async def run_one(item_id: str) -> dict[str, Any] | None:
+        if item_id == "basic":
+            return await _basic_connectivity_item(timeout_ms)
+        if item_id == "panel-auth":
+            return await _panel_auth_report_item()
+        if item_id == "clash-auth":
+            return await _clash_auth_report_item()
+        if item_id == "proxy-auth":
+            return await _proxy_auth_report_item(timeout_ms)
+        site_target = site_target_by_id.get(item_id)
+        if site_target is not None:
+            check = await _probe_site_via_proxy(site_target, timeout_ms)
+            report_status = _probe_status_to_report(str(check.get("status") or "fail"))
+            detail = check.get("error") or check.get("detail") or check.get("label") or ""
+            if check.get("http_status") is not None and not detail.startswith("HTTP"):
+                detail = f"HTTP {check.get('http_status')} · {detail}"
+            return {
+                "id": check.get("id"),
+                "name": check.get("name"),
+                "status": report_status,
+                "label": _report_status_label(report_status),
+                "http_status": check.get("http_status"),
+                "elapsed_ms": check.get("elapsed_ms"),
+                "detail": detail,
+            }
+        target = target_by_id.get(item_id)
+        if target is not None:
+            return await _probe_report_item(target, timeout_ms)
+        return None
+
+    sem = asyncio.Semaphore(3)
+
+    async def guarded(item_id: str) -> dict[str, Any] | None:
+        async with sem:
+            return await run_one(item_id)
+
+    items_raw, exit_info = await asyncio.gather(
+        asyncio.gather(*[guarded(item_id) for item_id in ids]),
+        _probe_exit_ip(timeout_ms) if "basic" in ids or len(ids) > 1 else asyncio.sleep(0, result={"ip": "", "region": ""}),
+    )
+    return [item for item in items_raw if item is not None], exit_info
+
+
+async def _proxy_auth_probe(timeout_ms: int) -> dict[str, Any]:
+    required = _http_proxy_auth_required()
+    start = time.perf_counter()
+    timeout = httpx.Timeout(max(3.0, min(timeout_ms / 1000, 15.0)), connect=4.0)
+    targets = (
+        DEFAULT_DELAY_TEST_URL,
+        "https://www.cloudflare.com/cdn-cgi/trace",
+        "http://www.msftconnecttest.com/connecttest.txt",
+    )
+    try:
+        async with httpx.AsyncClient(
+            proxy=_http_proxy_url(),
+            timeout=timeout,
+            follow_redirects=False,
+            headers={"User-Agent": "NetHub-Probe/1.0"},
+        ) as client:
+            r = None
+            last_error = ""
+            for url in targets:
+                try:
+                    r = await client.get(url)
+                    break
+                except httpx.HTTPError as e:
+                    last_error = _http_error_detail(e)
+            if r is None:
+                raise httpx.ConnectError(last_error or "无法通过 HTTP 代理入口发起请求")
+        elapsed_ms = int((time.perf_counter() - start) * 1000)
+        if r.status_code == 407:
+            return {
+                "id": "proxy-auth",
+                "name": "HTTP 代理鉴权",
+                "status": "error",
+                "label": "失败",
+                "result": "失败",
+                "detail": "代理入口要求用户名密码，但当前检测请求没有通过鉴权。",
+                "http_status": 407,
+                "elapsed_ms": elapsed_ms,
+                "error": "HTTP 代理鉴权失败",
+            }
+        if required:
+            label = "已通过" if r.status_code < 500 else "异常"
+            status = "ok" if r.status_code < 500 else "error"
+            result = "已通过" if status == "ok" else "异常"
+            detail = "HTTP 代理入口已启用用户名密码，本次检测已携带凭据并通过。"
+        else:
+            label = "无需鉴权"
+            status = "not_required"
+            result = "无需鉴权"
+            detail = "HTTP 代理入口当前未配置用户名密码，本次检测已确认可直接访问。"
+        return {
+            "id": "proxy-auth",
+            "name": "HTTP 代理鉴权",
+            "status": status,
+            "label": label,
+            "result": result,
+            "detail": detail,
+            "http_status": r.status_code,
+            "elapsed_ms": elapsed_ms,
+            "error": "",
+        }
+    except httpx.HTTPError as e:
+        elapsed_ms = int((time.perf_counter() - start) * 1000)
+        detail = _http_error_detail(e)
+        return {
+            "id": "proxy-auth",
+            "name": "HTTP 代理鉴权",
+            "status": "disabled" if not required else "error",
+            "label": "无需鉴权" if not required else "失败",
+            "result": "无需鉴权" if not required else "失败",
+            "detail": "HTTP 代理入口未配置用户名密码；可用性由基础连通性和站点检测判断。"
+            if not required
+            else f"无法通过 HTTP 代理入口完成鉴权检测：{detail}",
+            "http_status": None,
+            "elapsed_ms": elapsed_ms,
+            "error": "" if not required else detail,
+        }
+
+
+async def _clash_auth_probe() -> dict[str, Any]:
+    start = time.perf_counter()
+    try:
+        r = await clash_request("GET", "/version")
+        if r.status_code == 404:
+            r = await clash_request("GET", "/")
+        elapsed_ms = int((time.perf_counter() - start) * 1000)
+        auth_failed = r.status_code in (401, 403)
+        status = "error" if auth_failed or not r.is_success else "ok"
+        result = "失败" if auth_failed else "已通过" if r.is_success else "异常"
+        detail = (
+            "Clash API secret 不匹配或缺失。"
+            if auth_failed
+            else "面板已成功访问 sing-box Clash API。"
+            if r.is_success
+            else "Clash API 有响应，但状态码不正常。"
+        )
+        return {
+            "id": "clash-auth",
+            "name": "Clash API Auth",
+            "status": status,
+            "label": result,
+            "result": result,
+            "detail": detail,
+            "http_status": r.status_code,
+            "elapsed_ms": elapsed_ms,
+            "error": "Clash API secret 不匹配或缺失" if auth_failed else "",
+        }
+    except httpx.HTTPError as e:
+        elapsed_ms = int((time.perf_counter() - start) * 1000)
+        detail = _http_error_detail(e)
+        return {
+            "id": "clash-auth",
+            "name": "Clash API Auth",
+            "status": "error",
+            "label": "失败",
+            "result": "失败",
+            "detail": f"无法连接 sing-box Clash API，无法确认 Auth：{detail}",
+            "http_status": None,
+            "elapsed_ms": elapsed_ms,
+            "error": detail,
+        }
+
+
+async def _probe_site_via_proxy(target: dict[str, Any], timeout_ms: int) -> dict[str, Any]:
+    name = str(target.get("name") or target.get("id") or "site")
+    url = str(target.get("url") or "")
+    expect_status = set(int(s) for s in target.get("expect_status") or [])
+    blocked_markers = [str(m).lower() for m in target.get("blocked_markers") or []]
+    start = time.perf_counter()
+    timeout = httpx.Timeout(max(3.0, min(timeout_ms / 1000, 30.0)), connect=6.0)
+    try:
+        async with httpx.AsyncClient(
+            proxy=_http_proxy_url(),
+            timeout=timeout,
+            follow_redirects=True,
+            headers={"User-Agent": "NetHub-Probe/1.0"},
+        ) as client:
+            r = await client.get(url)
+        elapsed_ms = int((time.perf_counter() - start) * 1000)
+        content_type = r.headers.get("content-type") or ""
+        sample = (r.text or "")[:2000].lower() if "text" in content_type else ""
+        blocked = any(marker in sample for marker in blocked_markers)
+        if r.status_code == 407:
+            status = "error"
+            label = "鉴权失败"
+        elif blocked:
+            status = "restricted"
+            label = "疑似受限"
+        elif not expect_status or r.status_code in expect_status or r.is_success:
+            status = "unlocked" if blocked_markers else "ok"
+            label = "疑似解锁" if blocked_markers else "可用"
+        else:
+            status = "restricted" if r.status_code in (401, 403, 451) else "error"
+            label = "疑似受限" if status == "restricted" else "异常"
+        return {
+            "id": target.get("id"),
+            "name": name,
+            "url": url,
+            "status": status,
+            "label": label,
+            "http_status": r.status_code,
+            "elapsed_ms": elapsed_ms,
+            "error": "HTTP 代理鉴权失败" if r.status_code == 407 else "",
+        }
+    except httpx.HTTPError as e:
+        elapsed_ms = int((time.perf_counter() - start) * 1000)
+        detail = _http_error_detail(e)
+        return {
+            "id": target.get("id"),
+            "name": name,
+            "url": url,
+            "status": "error",
+            "label": "失败",
+            "http_status": None,
+            "elapsed_ms": elapsed_ms,
+            "detail": f"请求失败: {detail}",
+            "error": detail,
+        }
 
 
 async def _clash_proxy_delay_ms(proxy_name: str, timeout_ms: int, test_url: str) -> tuple[int | None, str | None]:
@@ -1075,6 +2008,29 @@ async def api_proxy_delay(body: ProxyDelayBody, request: Request):
 async def api_node_health(request: Request):
     login_required(request)
     return {"ok": True, "health": HEALTH_STORE.snapshot()}
+
+
+@app.post("/api/site-probes")
+async def api_site_probes(body: SiteProbeBody, request: Request):
+    login_required(request)
+    verify_csrf(request)
+    timeout_ms = body.timeout_ms if body.timeout_ms is not None else 12000
+    timeout_ms = max(3000, min(int(timeout_ms), 30000))
+    panel_audit("检测常用网站可用性与解锁情况", request=request, op="站点检测")
+    catalog = _quality_probe_catalog()
+    valid_ids = [item["id"] for item in catalog]
+    requested = [str(i) for i in (body.ids or valid_ids) if str(i) in valid_ids]
+    if not requested:
+        raise HTTPException(status_code=400, detail="未指定有效检测项")
+    items, exit_info = await _run_quality_probe_ids(requested, timeout_ms)
+    report = _quality_report_from_items(items, exit_info, name=(body.node_name or "").strip() or "nethub")
+    return {
+        "ok": True,
+        "proxy": "http://127.0.0.1",
+        "catalog": catalog,
+        "report": report,
+        "results": [],
+    }
 
 
 class VaultImportBody(BaseModel):
@@ -1558,7 +2514,7 @@ async def api_rebuild(body: RebuildBody, request: Request):
 
 @app.get("/api/traffic")
 async def api_traffic(request: Request):
-    """通过 SSE 代理内核流量数据。"""
+    """通过 SSE 转发 sing-box Clash API /traffic，表示代理内核实时上下行速率。"""
     login_required(request)
 
     async def event_generator():

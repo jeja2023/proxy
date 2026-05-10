@@ -55,39 +55,74 @@
     <main class="main">
       <!-- 运行状态面板 -->
       <div id="panel-node">
-        <div id="dashboard-summary" class="dashboard-grid">
-          <div class="card metric-card">
-            <div class="metric-value" id="stat-down">0.00 KB/s</div>
-            <div class="metric-label">下载速度 (Real-time)</div>
-            <div class="traffic-chart-container" style="height: 120px;">
-              <canvas id="chart-down" class="traffic-chart-canvas"></canvas>
+        <section class="card dashboard-shell">
+          <div class="page-title-row">
+            <div>
+              <h2>运行状态</h2>
+              <p class="hint">查看实时流量、当前出口节点与云端网关概览。</p>
             </div>
           </div>
-          <div class="card metric-card">
-            <div class="metric-value" id="stat-up">0.00 KB/s</div>
-            <div class="metric-label">上传速度 (Real-time)</div>
-            <div class="traffic-chart-container" style="height: 120px;">
-              <canvas id="chart-up" class="traffic-chart-canvas"></canvas>
+          <div id="dashboard-summary" class="dashboard-grid">
+            <div class="metric-card">
+              <div class="metric-value" id="stat-down">0.00 KB/s</div>
+              <div class="metric-label">代理下载速度</div>
+              <div class="traffic-chart-container" style="height: 120px;">
+                <canvas id="chart-down" class="traffic-chart-canvas"></canvas>
+              </div>
+            </div>
+            <div class="metric-card">
+              <div class="metric-value" id="stat-up">0.00 KB/s</div>
+              <div class="metric-label">代理上传速度</div>
+              <div class="traffic-chart-container" style="height: 120px;">
+                <canvas id="chart-up" class="traffic-chart-canvas"></canvas>
+              </div>
+            </div>
+            <div class="metric-card">
+              <div class="metric-value" id="stat-node">未连接</div>
+              <div class="metric-label">活跃出口节点</div>
+              <div id="stat-route-mode" class="metric-detail">分流模式: 正在读取...</div>
+            </div>
+            <div class="metric-card">
+              <div class="metric-value" id="stat-gateway">网关就绪</div>
+              <div class="metric-label">云端网关总览</div>
+              <div id="stat-gateway-detail" class="metric-detail">正在读取节点库与健康状态...</div>
             </div>
           </div>
-          <div class="card metric-card">
-            <div class="metric-value" id="stat-node">未连接</div>
-            <div class="metric-label">活跃出口节点</div>
-            <div id="stat-route-mode" style="margin-top: 1rem; font-size: 0.85rem; color: var(--muted); font-weight: 500;">分流模式: 正在读取...</div>
+          <div class="runtime-grid">
+            <div class="runtime-card">
+              <div class="runtime-label">内核状态</div>
+              <div class="runtime-value" id="runtime-core">检测中</div>
+              <div class="runtime-detail" id="runtime-core-detail">正在读取 Clash API 状态</div>
+            </div>
+            <div class="runtime-card">
+              <div class="runtime-label">代理入口</div>
+              <div class="runtime-value" id="runtime-proxy">检测中</div>
+              <div class="runtime-detail" id="runtime-proxy-detail">正在读取 HTTP 代理状态</div>
+            </div>
+            <div class="runtime-card">
+              <div class="runtime-label">节点健康</div>
+              <div class="runtime-value" id="runtime-health">未知</div>
+              <div class="runtime-detail" id="runtime-health-detail">等待健康评分数据</div>
+            </div>
+            <div class="runtime-card">
+              <div class="runtime-label">连接概览</div>
+              <div class="runtime-value" id="runtime-connections">0 活跃</div>
+              <div class="runtime-detail" id="runtime-connections-detail">上传 / 下载 0 B / 0 B</div>
+            </div>
+            <div class="runtime-card">
+              <div class="runtime-label">订阅维护</div>
+              <div class="runtime-value" id="runtime-subscription">未启用</div>
+              <div class="runtime-detail" id="runtime-subscription-detail">后台刷新关闭</div>
+            </div>
           </div>
-          <div class="card metric-card">
-            <div class="metric-value" id="stat-gateway">网关就绪</div>
-            <div class="metric-label">云端网关总览</div>
-            <div id="stat-gateway-detail" style="margin-top: 1rem; font-size: 0.85rem; color: var(--muted); font-weight: 500;">正在读取节点库与健康状态...</div>
-          </div>
-        </div>
+        </section>
       </div>
 
       <!-- 节点选择面板 -->
       <div id="panel-proxies" class="hidden">
         <section id="selector-section" class="card">
           <div class="vault-manage-head">
-            <h2>节点选择 <span id="selector-tag" class="tag"></span></h2>
+            <h2>节点选择 <span id="selector-tag" class="tag hidden"></span></h2>
             <div class="auto-switch-wrap" style="display: flex; align-items: center; gap: 0.5rem;">
                <label class="switch" for="cb-auto-switch">
                  <input type="checkbox" id="cb-auto-switch" />
@@ -100,6 +135,7 @@
           <div class="node-toolbar">
             <div class="node-toolbar-left">
               <button type="button" id="btn-test-all" class="btn-secondary btn-mini">测试全部延迟</button>
+              <button type="button" id="btn-site-probe" class="btn-secondary btn-mini">检测常用网站</button>
               <span id="node-test-hint" class="node-toolbar-hint"></span>
             </div>
             <div class="node-toolbar-right" style="display: flex; gap: 0.5rem; align-items: center;">
@@ -163,7 +199,7 @@
       <div id="panel-conns" class="hidden">
         <section class="card">
           <div class="vault-manage-head">
-            <h2>活动连接监控 <span id="conns-count-badge" class="tag" style="background: var(--primary); color: #fff;">0</span></h2>
+            <h2>活动连接监控</h2>
             <div style="display: flex; gap: 0.5rem; align-items: center;">
                <input type="text" id="conn-search" class="input-mini" placeholder="搜索目标主机/IP..." style="width: 200px;" />
                <button type="button" id="btn-refresh-conns" class="btn-secondary">刷新</button>
@@ -321,6 +357,22 @@
     </div>
   </div>
 
+  <div id="modal-quality-report" class="modal-overlay hidden">
+    <div class="modal modal-lg quality-report-modal">
+      <div class="modal-head quality-report-head">
+        <h3>代理质量检测报告</h3>
+        <button type="button" class="modal-close-btn" onclick="hideModal('modal-quality-report')" aria-label="关闭">×</button>
+      </div>
+      <div class="modal-body">
+        <div id="quality-report-body" class="quality-report-body"></div>
+      </div>
+      <div class="modal-actions">
+        <button type="button" id="btn-quality-run-all">一键检测</button>
+        <button type="button" onclick="hideModal('modal-quality-report')" class="btn-secondary">关闭</button>
+      </div>
+    </div>
+  </div>
+
   <!-- 导出订阅弹窗 -->
   <div id="modal-export-sub" class="modal-overlay hidden">
     <div class="modal modal-md">
@@ -367,7 +419,7 @@
   </div>
 
   <footer class="footer">
-    <span>网枢 NetHub 控制中心 v0.0.3 - 稳定运行中</span>
+    <span>网枢 NetHub 控制中心 v0.0.4 - 稳定运行中</span>
   </footer>
   <script src="/static/app.js"></script>
 </body>
