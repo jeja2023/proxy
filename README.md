@@ -96,7 +96,7 @@ python scripts/diagnose_server.py
 *   **检测节点质量**：进入 Web 面板「节点选择」，点击「检测常用网站」打开代理质量检测报告，可一键检测或单独检测常用网站、解锁状态、鉴权与 AI API 可达性。
 *   **查看系统日志**：可通过 Web 面板实时查看，或直接查阅 `data/panel_audit.jsonl`。
 *   **Docker 容器维护与更新**：
-    *   **重构镜像并重新拉起服务（推荐日常更新）**：`sudo docker compose --profile panel up -d --build`
+    *   **重构镜像并重新拉起服务（推荐日常更新）**：`sudo docker compose --profile panel up -d --build --force-recreate`
     *   **无缓存全新编译镜像并强制重建容器**：`sudo docker compose --profile panel build --no-cache && sudo docker compose --profile panel up -d --force-recreate`
     *   **优雅关闭并彻底释放容器与网络桥接**：`sudo docker compose --profile panel down`
 *   **生产依赖锁定**：容器构建默认使用 `requirements.lock`；本地开发仍可使用 `requirements.txt`。
