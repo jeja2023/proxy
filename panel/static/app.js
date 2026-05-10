@@ -190,17 +190,22 @@
   function setRuntimeMetric(id, value, detail, state = "") {
     const valueEl = $(id);
     const detailEl = $(`${id}-detail`);
+    const cardEl = valueEl ? valueEl.closest(".runtime-card") : null;
+    const valueText = value == null ? "" : String(value);
+    const detailText = detail == null ? "" : String(detail);
+    const titleText = detailText ? `${valueText}\n${detailText}` : valueText;
     if (valueEl) {
-      valueEl.textContent = value;
+      valueEl.textContent = valueText;
+      valueEl.title = titleText;
       valueEl.classList.toggle("is-ok", state === "ok");
       valueEl.classList.toggle("is-warn", state === "warn");
       valueEl.classList.toggle("is-bad", state === "bad");
     }
     if (detailEl) {
-      const detailText = detail || "";
       detailEl.textContent = detailText;
-      detailEl.title = detailText;
+      detailEl.title = titleText;
     }
+    if (cardEl) cardEl.title = titleText;
   }
 
   const TAB_KEY = "current_panel_tab";
