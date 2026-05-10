@@ -196,7 +196,11 @@
       valueEl.classList.toggle("is-warn", state === "warn");
       valueEl.classList.toggle("is-bad", state === "bad");
     }
-    if (detailEl) detailEl.textContent = detail || "";
+    if (detailEl) {
+      const detailText = detail || "";
+      detailEl.textContent = detailText;
+      detailEl.title = detailText;
+    }
   }
 
   const TAB_KEY = "current_panel_tab";
