@@ -1243,8 +1243,9 @@ def _http_proxy_port() -> int:
 
 
 def _http_proxy_public_port() -> int:
+    public_port = os.environ.get("SINGBOX_HTTP_PUBLIC_PORT", "").strip()
     try:
-        return int(os.environ.get("SINGBOX_HTTP_PORT", "2080") or "2080")
+        return int(public_port or os.environ.get("SINGBOX_HTTP_PORT", "2080") or "2080")
     except ValueError:
         return _http_proxy_port()
 

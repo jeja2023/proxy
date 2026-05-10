@@ -47,7 +47,7 @@ docker compose --profile panel up -d
 
 ### 服务器代理端口说明
 
-Docker 部署时，`.env` 里的 `SINGBOX_HTTP_PORT` 表示公网/宿主机端口，容器内 sing-box 默认固定监听 `2080`。例如 `SINGBOX_HTTP_PORT=5986` 时，客户端应连接 `服务器IP:5986`，Compose 会转发到容器内 `2080`。
+Docker 部署时，`.env` 里的 `SINGBOX_HTTP_PORT` 表示公网/宿主机端口，容器内 sing-box 默认固定监听 `2080`。例如 `SINGBOX_HTTP_PORT=5986` 时，客户端应连接 `服务器IP:5986`，Compose 会转发到容器内 `2080`；运行状态页会显示 `HTTP :5986`，并在详情里标注 `公网 :5986 · 内部 :2080`。修改端口后需要执行 `docker compose --profile panel up -d --force-recreate`，让面板容器读取新的端口环境变量。
 
 如果修改过 `.env` 端口或升级了 Compose 配置，请执行：
 
