@@ -1,6 +1,7 @@
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -49,6 +50,28 @@ class ProxyAuthReloadTests(unittest.TestCase):
         new = config_with_users()
 
         self.assertTrue(panel_main._proxy_auth_change_requires_connection_close(old, new))
+
+
+class ProxyAuthStartupCleanupTests(unittest.IsolatedAsyncioTestCase):
+    async def test_startup_closes_connections_when_proxy_auth_is_required(self) -> None:
+        with (
+            patch.object(panel_main, "_http_proxy_auth_required", return_value=True),
+            patch.object(panel_main, "_close_proxy_connections_sync", return_value=True) as close_mock,
+            patch.object(panel_main.asyncio, "sleep", new=AsyncMock()),
+        ):
+            await panel_main._enforce_proxy_auth_connections_on_startup()
+
+        close_mock.assert_called_once()
+
+    async def test_startup_skips_cleanup_when_proxy_auth_is_not_required(self) -> None:
+        with (
+            patch.object(panel_main, "_http_proxy_auth_required", return_value=False),
+            patch.object(panel_main, "_close_proxy_connections_sync", return_value=True) as close_mock,
+            patch.object(panel_main.asyncio, "sleep", new=AsyncMock()),
+        ):
+            await panel_main._enforce_proxy_auth_connections_on_startup()
+
+        close_mock.assert_not_called()
 
 
 if __name__ == "__main__":

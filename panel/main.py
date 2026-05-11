@@ -801,6 +801,22 @@ async def _subscription_refresh_loop() -> None:
         panel_audit(f"订阅后台刷新完成：成功 {result['refreshed']} 个，失败 {len(result['failed'])} 个", op="后台刷新")
 
 
+async def _enforce_proxy_auth_connections_on_startup() -> None:
+    await asyncio.sleep(2.0)
+    try:
+        if not _http_proxy_auth_required():
+            return
+        secret = os.environ.get("CLASH_API_SECRET", "").strip()
+        closed = _close_proxy_connections_sync(current_secret=secret, next_secret=secret)
+        if closed:
+            logger.info("proxy auth is enabled; closed existing proxy connections on panel startup")
+            panel_audit("代理鉴权已启用，面板启动时已断开历史代理连接", op="安全加固")
+        else:
+            logger.warning("proxy auth is enabled but startup connection cleanup failed")
+    except Exception as e:
+        logger.warning("startup proxy auth connection cleanup failed: %s", e)
+
+
 @asynccontextmanager
 async def _panel_lifespan(application: FastAPI):
     level = logging.DEBUG if PANEL_DEBUG else logging.INFO
@@ -814,6 +830,7 @@ async def _panel_lifespan(application: FastAPI):
     _clash_timeout = float(os.environ.get("PANEL_CLASH_TIMEOUT", "15"))
     application.state.http_client = httpx.AsyncClient(timeout=_clash_timeout)
     application.state.sub_refresh_task = asyncio.create_task(_subscription_refresh_loop())
+    application.state.proxy_auth_startup_task = asyncio.create_task(_enforce_proxy_auth_connections_on_startup())
     panel_audit("面板服务已启动")
     try:
         yield
@@ -821,6 +838,9 @@ async def _panel_lifespan(application: FastAPI):
         task = getattr(application.state, "sub_refresh_task", None)
         if task:
             task.cancel()
+        startup_task = getattr(application.state, "proxy_auth_startup_task", None)
+        if startup_task:
+            startup_task.cancel()
         await application.state.http_client.aclose()
 
 
