@@ -12,6 +12,10 @@ _DEFAULT_CONFIG = _REPO_ROOT / "config.json"
 def main() -> None:
     if str(_REPO_ROOT) not in sys.path:
         sys.path.insert(0, str(_REPO_ROOT))
+    
+    from core.env import load_repo_dotenv
+    load_repo_dotenv(_REPO_ROOT)
+    
     from core.build_config import (
         NodeBuildError,
         build_singbox_config,
