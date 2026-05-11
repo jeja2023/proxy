@@ -393,6 +393,112 @@ def _import_vault_urls(
     return len(unique_urls), duplicate_count, total
 
 
+def _read_config_json_file(path: Path) -> dict[str, Any] | None:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _http_proxy_auth_signature(config: dict[str, Any] | None) -> tuple[tuple[str, tuple[tuple[str, str], ...]], ...]:
+    if not isinstance(config, dict):
+        return ()
+    entries: list[tuple[str, tuple[tuple[str, str], ...]]] = []
+    for inbound in config.get("inbounds") or []:
+        if not isinstance(inbound, dict) or inbound.get("type") != "http":
+            continue
+        users: list[tuple[str, str]] = []
+        for user in inbound.get("users") or []:
+            if not isinstance(user, dict):
+                continue
+            username = str(user.get("username") or "").strip()
+            password = str(user.get("password") or "").strip()
+            if username and password:
+                users.append((username, password))
+        entries.append((str(inbound.get("tag") or ""), tuple(users)))
+    return tuple(sorted(entries, key=lambda item: item[0]))
+
+
+def _http_proxy_auth_required_in_config(config: dict[str, Any] | None) -> bool:
+    return any(users for _, users in _http_proxy_auth_signature(config))
+
+
+def _proxy_auth_change_requires_connection_close(
+    old_config: dict[str, Any] | None,
+    new_config: dict[str, Any] | None,
+) -> bool:
+    old_signature = _http_proxy_auth_signature(old_config)
+    new_signature = _http_proxy_auth_signature(new_config)
+    if old_signature == new_signature:
+        return False
+    return _http_proxy_auth_required_in_config(old_config) or _http_proxy_auth_required_in_config(new_config)
+
+
+def _secret_candidates(*values: str | None) -> list[str]:
+    out: list[str] = []
+    for value in values:
+        secret = (value or "").strip()
+        if secret not in out:
+            out.append(secret)
+    return out or [""]
+
+
+def _sync_clash_api_request(
+    method: str,
+    path: str,
+    *,
+    secret_candidates: list[str],
+    json_body: dict[str, Any] | None = None,
+    timeout: float = 3.0,
+) -> httpx.Response | None:
+    url = f"{CLASH_BASE}{path}"
+    last_error: Exception | None = None
+    with httpx.Client() as client:
+        for idx, secret in enumerate(secret_candidates):
+            headers = {"Authorization": f"Bearer {secret}"} if secret else {}
+            try:
+                response = client.request(method, url, headers=headers, json=json_body, timeout=timeout)
+            except Exception as e:
+                last_error = e
+                continue
+            if response.status_code in (401, 403) and idx + 1 < len(secret_candidates):
+                continue
+            return response
+    if last_error is not None:
+        logger.warning("Clash API request failed: %s %s: %s", method, path, last_error)
+    return None
+
+
+def _reload_singbox_config_sync(*, current_secret: str | None, next_secret: str | None) -> bool:
+    response = _sync_clash_api_request(
+        "PUT",
+        "/configs",
+        secret_candidates=_secret_candidates(current_secret, next_secret),
+        json_body={"force": True},
+    )
+    if response is None:
+        return False
+    if not response.is_success:
+        logger.warning("sing-box reload returned HTTP %s: %s", response.status_code, response.text[:300])
+        return False
+    return True
+
+
+def _close_proxy_connections_sync(*, current_secret: str | None, next_secret: str | None) -> bool:
+    response = _sync_clash_api_request(
+        "DELETE",
+        "/connections",
+        secret_candidates=_secret_candidates(next_secret, current_secret),
+    )
+    if response is None:
+        return False
+    if not response.is_success:
+        logger.warning("closing proxy connections returned HTTP %s: %s", response.status_code, response.text[:300])
+        return False
+    return True
+
+
 def _rebuild_config_from_vaults(vault_password: str, clash_secret: str | None = None, route_mode: str = "bypass_cn") -> int:
     """解密所有启用 vault，合并生成 config.json；返回合并后的节点数。"""
 
@@ -415,8 +521,9 @@ def _rebuild_config_from_vaults(vault_password: str, clash_secret: str | None = 
         raise HTTPException(status_code=400, detail="未找到任何可用节点（所有库为空或未启用）")
 
     old_secret = os.environ.get("CLASH_API_SECRET")
+    next_secret = clash_secret.strip() if clash_secret and clash_secret.strip() else (old_secret or "")
     if clash_secret and clash_secret.strip():
-        os.environ["CLASH_API_SECRET"] = clash_secret.strip()
+        os.environ["CLASH_API_SECRET"] = next_secret
     try:
         cfg = build_singbox_config(all_urls, route_mode=route_mode)
     except (NodeBuildError, ValueError) as e:
@@ -429,21 +536,20 @@ def _rebuild_config_from_vaults(vault_password: str, clash_secret: str | None = 
                 os.environ.pop("CLASH_API_SECRET", None)
 
     try:
+        previous_cfg = _read_config_json_file(CONFIG_FILE)
+        close_existing_connections = _proxy_auth_change_requires_connection_close(previous_cfg, cfg)
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         write_singbox_config(cfg, CONFIG_FILE)
         marker = DATA_DIR / ".config_revision"
         marker.write_text(str(CONFIG_FILE.stat().st_mtime_ns), encoding="utf-8")
-        
-        # 尝试通过 Clash API 通知内核热重载
-        import httpx
-        url = f"{CLASH_BASE}/configs"
-        headers = {"Authorization": f"Bearer {os.environ.get('CLASH_API_SECRET', '').strip()}"}
-        # {"force": True} 触发重载
-        with httpx.Client() as client:
-            try:
-                client.put(url, headers=headers, json={"force": True}, timeout=3.0)
-            except Exception:
-                pass
+
+        reloaded = _reload_singbox_config_sync(current_secret=old_secret, next_secret=next_secret)
+        if close_existing_connections:
+            closed = _close_proxy_connections_sync(current_secret=old_secret, next_secret=next_secret)
+            if closed:
+                logger.info("proxy auth changed; closed existing proxy connections after config reload")
+            elif reloaded:
+                logger.warning("proxy auth changed but existing proxy connections could not be closed")
     except OSError as e:
         raise HTTPException(status_code=500, detail=f"写入 config.json 失败: {e}") from e
     return len(all_urls)
