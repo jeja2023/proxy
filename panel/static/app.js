@@ -1767,9 +1767,10 @@
   }
 
   function renderVaultNodesList(vaultName, urls, password) {
-    $("view-vault-name").textContent = vaultName;
-    const wrap = $("view-vault-content");
-    wrap.innerHTML = "";
+    const titleEl = $("vault-view-title");
+    if (titleEl) titleEl.textContent = "查看库节点 - " + vaultName;
+    const wrap = $("vault-nodes-list-wrap");
+    if (wrap) wrap.innerHTML = "";
     if (!urls || !urls.length) {
       wrap.innerHTML = '<p style="padding: 2rem; text-align: center; color: var(--muted);">（库内暂无节点）</p>';
     } else {
