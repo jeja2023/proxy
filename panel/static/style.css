@@ -1335,6 +1335,9 @@ body.modal-open .node-cards {
   border: 1px solid var(--border);
   border-radius: 12px;
   cursor: pointer;
+  color: var(--text);
+  font-size: 0.95rem;
+  font-weight: 500;
   transition: all 0.2s ease;
 }
 
