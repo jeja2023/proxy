@@ -2255,6 +2255,8 @@
               currentImportPassword = pw;
               const targetNameEl = $("import-target-name");
               if (targetNameEl) targetNameEl.textContent = name;
+              const targetNameSubEl = $("import-target-name-sub");
+              if (targetNameSubEl) targetNameSubEl.textContent = name;
               const targetNameManualEl = $("import-target-name-manual");
               if (targetNameManualEl) targetNameManualEl.textContent = name;
               showModal("modal-import-choice");
