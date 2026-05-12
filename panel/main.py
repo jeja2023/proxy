@@ -435,6 +435,42 @@ def _proxy_auth_change_requires_connection_close(
     return _http_proxy_auth_required_in_config(old_config) or _http_proxy_auth_required_in_config(new_config)
 
 
+def _ensure_config_auth_matches_env() -> bool:
+    """确保 config.json 中的 HTTP 入站鉴权配置与环境变量一致。
+
+    场景：config.json 可能在设置鉴权环境变量之前生成，此时入站配置缺少 users 字段，
+    sing-box 不会要求鉴权。本函数检查并补写 users 字段，使鉴权真正生效。
+    返回 True 表示配置已被修正。
+    """
+    user = os.environ.get("SINGBOX_HTTP_USER", "").strip()
+    password = os.environ.get("SINGBOX_HTTP_PASS", "").strip()
+    if not user or not password:
+        return False
+
+    try:
+        data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+
+    expected_users = [{"username": user, "password": password}]
+    changed = False
+    for inbound in data.get("inbounds") or []:
+        if not isinstance(inbound, dict) or inbound.get("type") != "http":
+            continue
+        current_users = inbound.get("users") or []
+        if current_users == expected_users:
+            continue
+        inbound["users"] = expected_users
+        changed = True
+
+    if changed:
+        try:
+            write_singbox_config(data, CONFIG_FILE)
+        except Exception:
+            return False
+    return changed
+
+
 def _secret_candidates(*values: str | None) -> list[str]:
     out: list[str] = []
     for value in values:
@@ -545,11 +581,19 @@ def _rebuild_config_from_vaults(vault_password: str, clash_secret: str | None = 
 
         reloaded = _reload_singbox_config_sync(current_secret=old_secret, next_secret=next_secret)
         if close_existing_connections:
-            closed = _close_proxy_connections_sync(current_secret=old_secret, next_secret=next_secret)
-            if closed:
-                logger.info("proxy auth changed; closed existing proxy connections after config reload")
+            # 等待内核完成配置重载后再断开连接，避免因时序问题导致旧连接存活
+            time.sleep(1.0)
+            success_count = 0
+            for attempt in range(3):
+                if attempt > 0:
+                    time.sleep(1.5)
+                closed = _close_proxy_connections_sync(current_secret=old_secret, next_secret=next_secret)
+                if closed:
+                    success_count += 1
+            if success_count > 0:
+                logger.info("代理鉴权已变更，已断开历史代理连接（%d/%d 次成功）", success_count, 3)
             elif reloaded:
-                logger.warning("proxy auth changed but existing proxy connections could not be closed")
+                logger.warning("代理鉴权已变更，但未能断开历史代理连接")
     except OSError as e:
         raise HTTPException(status_code=500, detail=f"写入 config.json 失败: {e}") from e
     return len(all_urls)
@@ -802,19 +846,50 @@ async def _subscription_refresh_loop() -> None:
 
 
 async def _enforce_proxy_auth_connections_on_startup() -> None:
-    await asyncio.sleep(2.0)
+    """面板启动时，若代理鉴权已启用，等待内核就绪后强制断开所有历史连接。"""
+    secret = os.environ.get("CLASH_API_SECRET", "").strip()
+    # 等待 sing-box Clash API 就绪（最多 60 秒）
+    api_ready = False
+    for _ in range(30):
+        await asyncio.sleep(2.0)
+        try:
+            response = _sync_clash_api_request(
+                "GET", "/configs",
+                secret_candidates=_secret_candidates(secret),
+            )
+            if response is not None:
+                api_ready = True
+                break
+        except Exception:
+            pass
+    if not api_ready:
+        logger.warning("等待内核 Clash API 就绪超时，跳过代理连接清理")
+        return
     try:
+        # 确保磁盘上的 config.json 包含鉴权配置（可能是在设置鉴权前生成的旧配置）
+        config_patched = _ensure_config_auth_matches_env()
+        if config_patched:
+            logger.info("检测到 config.json 缺少鉴权配置，已根据环境变量补写 users 字段")
+            _reload_singbox_config_sync(current_secret=secret, next_secret=secret)
+            await asyncio.sleep(1.0)
+
         if not _http_proxy_auth_required():
             return
-        secret = os.environ.get("CLASH_API_SECRET", "").strip()
-        closed = _close_proxy_connections_sync(current_secret=secret, next_secret=secret)
-        if closed:
-            logger.info("proxy auth is enabled; closed existing proxy connections on panel startup")
+        # 多轮清理：确保在内核完全就绪后彻底断开历史连接
+        success_count = 0
+        for attempt in range(5):
+            if attempt > 0:
+                await asyncio.sleep(2.0)
+            closed = _close_proxy_connections_sync(current_secret=secret, next_secret=secret)
+            if closed:
+                success_count += 1
+        if success_count > 0:
+            logger.info("代理鉴权已启用，面板启动时已断开历史代理连接（%d/%d 次成功）", success_count, 5)
             panel_audit("代理鉴权已启用，面板启动时已断开历史代理连接", op="安全加固")
         else:
-            logger.warning("proxy auth is enabled but startup connection cleanup failed")
+            logger.warning("代理鉴权已启用，但面板启动时未能断开历史代理连接")
     except Exception as e:
-        logger.warning("startup proxy auth connection cleanup failed: %s", e)
+        logger.warning("面板启动代理连接清理失败: %s", e)
 
 
 @asynccontextmanager
