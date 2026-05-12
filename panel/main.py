@@ -54,6 +54,8 @@ _LEGACY_VAULT_FILE = DATA_DIR / "vault.enc"
 VAULTS_DIR = DATA_DIR / "vaults"
 VAULTS_INDEX = VAULTS_DIR / "index.json"
 CONFIG_FILE = Path(os.environ.get("PROXY_CONFIG_PATH", str(REPO_ROOT / "config.json"))).resolve()
+# sing-box 内核看到的配置文件路径（Docker 中与面板路径不同，需通过环境变量指定）
+_SINGBOX_CONFIG_PATH = os.environ.get("SINGBOX_CONFIG_PATH", "").strip() or str(CONFIG_FILE)
 
 SELECTOR_TAG = os.environ.get("PANEL_SELECTOR_TAG", "代理选择").strip() or "代理选择"
 DEFAULT_DELAY_TEST_URL = os.environ.get(
@@ -507,18 +509,35 @@ def _sync_clash_api_request(
 
 
 def _reload_singbox_config_sync(*, current_secret: str | None, next_secret: str | None) -> bool:
+    """通知 sing-box 重载配置，传入内核侧配置文件路径以确保 inbound 等完整重建。"""
+    candidates = _secret_candidates(current_secret, next_secret)
+    # 首选：带 path 参数重载（sing-box 会从该路径重新读取并完整重建所有组件）
     response = _sync_clash_api_request(
         "PUT",
         "/configs",
-        secret_candidates=_secret_candidates(current_secret, next_secret),
-        json_body={"force": True},
+        secret_candidates=candidates,
+        json_body={"path": _SINGBOX_CONFIG_PATH, "force": True},
+        timeout=8.0,
     )
-    if response is None:
-        return False
-    if not response.is_success:
-        logger.warning("sing-box reload returned HTTP %s: %s", response.status_code, response.text[:300])
-        return False
-    return True
+    if response is not None and response.is_success:
+        return True
+    # 后备：发送完整配置 payload（不依赖 sing-box 读取文件）
+    try:
+        payload = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+        response = _sync_clash_api_request(
+            "PUT",
+            "/configs",
+            secret_candidates=candidates,
+            json_body={"payload": payload, "force": True},
+            timeout=8.0,
+        )
+        if response is not None and response.is_success:
+            return True
+    except (OSError, json.JSONDecodeError):
+        pass
+    if response is not None:
+        logger.warning("sing-box 配置重载失败 HTTP %s: %s", response.status_code, response.text[:300])
+    return False
 
 
 def _close_proxy_connections_sync(*, current_secret: str | None, next_secret: str | None) -> bool:
